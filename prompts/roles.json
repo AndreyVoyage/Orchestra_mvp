@@ -1,0 +1,101 @@
+{
+  "version": "3.0",
+  "roles": [
+    {
+      "id": "ROLE-001",
+      "name": "security",
+      "file": "ROLE-001-security.md",
+      "description": "AppSec, уязвимости, секреты, инъекции"
+    },
+    {
+      "id": "ROLE-002",
+      "name": "qa",
+      "file": "ROLE-002-qa.md",
+      "description": "Тесты, граничные случаи, покрытие"
+    },
+    {
+      "id": "ROLE-003",
+      "name": "performance",
+      "file": "ROLE-003-performance.md",
+      "description": "Оптимизация, алгоритмы, нагрузка"
+    },
+    {
+      "id": "ROLE-004",
+      "name": "reviewer",
+      "file": "ROLE-004-reviewer.md",
+      "description": "Читаемость, архитектура, governance"
+    },
+    {
+      "id": "ROLE-005",
+      "name": "architect",
+      "file": "ROLE-005-architect.md",
+      "description": "Масштабируемость, паттерны, стек"
+    },
+    {
+      "id": "ROLE-006",
+      "name": "frontend",
+      "file": "ROLE-006-frontend.md",
+      "description": "a11y, рендеринг, Core Web Vitals"
+    },
+    {
+      "id": "ROLE-007",
+      "name": "ux",
+      "file": "ROLE-007-ux.md",
+      "description": "User flows, когнитивная нагрузка"
+    },
+    {
+      "id": "ROLE-008",
+      "name": "prompt_engineer",
+      "file": "ROLE-008-prompt-engineer.md",
+      "description": "Токены, injection, формат вывода"
+    },
+    {
+      "id": "ROLE-009",
+      "name": "integration",
+      "file": "ROLE-009-integration.md",
+      "description": "API контракты, идемпотентность"
+    },
+    {
+      "id": "ROLE-010",
+      "name": "code_auditor",
+      "file": "ROLE-010-code-auditor.md",
+      "description": "Техдолг, лицензии, мёртвый код"
+    },
+    {
+      "id": "ROLE-011",
+      "name": "dependency_analyst",
+      "file": "ROLE-011-dependency-analyst.md",
+      "description": "Графы зависимостей, циклы, impact"
+    },
+    {
+      "id": "ROLE-012",
+      "name": "project_loader",
+      "file": "ROLE-012-project-loader.md",
+      "description": "Структура проекта, entry points"
+    },
+    {
+      "id": "ROLE-013",
+      "name": "regression_analyst",
+      "file": "ROLE-013-regression-analyst.md",
+      "description": "Impact analysis, каскадные сбои"
+    },
+    {
+      "id": "ROLE-014",
+      "name": "documentation_auditor",
+      "file": "ROLE-014-documentation-auditor.md",
+      "description": "README, API docs, CHANGELOG"
+    },
+    {
+      "id": "ROLE-015",
+      "name": "test_engineer",
+      "file": "ROLE-015-test-engineer.md",
+      "description": "Unit, integration, e2e, coverage"
+    },
+    {
+      "id": "ROLE-016",
+      "name": "repository_builder",
+      "file": "ROLE-016-repository-builder.md",
+      "description": "Целостность, импорты, сборка"
+    }
+  ]
+}
