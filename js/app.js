@@ -889,76 +889,115 @@ function formatReport(analysis) {
 // Handles CORS, file:// protocol, manual file selection
 // ============================================
 
-
 const TOAST_TYPES = { ERROR: 'error', SUCCESS: 'success', WARN: 'warn', INFO: 'info' };
 
+let _rolesAbortController = null;
+let _rolesLoading = false;
+
+function normalizeBaseUrl(url) {
+  return (url || './prompts/').replace(/\/+$/, '') + '/';
+}
+
 async function loadRoles() {
-  const baseUrl = document.getElementById('baseUrl')?.value?.replace(/\/?$/, '/') || './prompts/';
+  if (_rolesLoading) {
+    showToast('Загрузка уже идёт', TOAST_TYPES.WARN);
+    return;
+  }
+  _rolesLoading = true;
+
+  const baseUrl = normalizeBaseUrl(document.getElementById('baseUrl')?.value);
   store.setState({ baseUrl, lastAction: 'Загрузка ролей...' });
 
   if (!isValidBaseUrl(baseUrl)) {
     showToast('Некорректный URL', TOAST_TYPES.ERROR);
     updateRolesStatus('error', 'Некорректный URL', 'Проверьте путь');
+    _rolesLoading = false;
     return;
   }
 
-  // If opened as file:// — fetch won't work
   if (window.location.protocol === 'file:') {
     showToast('Локальный файл: используйте кнопку «Выбрать roles.json»', TOAST_TYPES.WARN);
     updateRolesStatus('warning', 'Локальный режим (file://)', 'fetch() заблокирован браузером. Нажмите кнопку «Выбрать roles.json» ниже, чтобы загрузить роли вручную.');
+    _rolesLoading = false;
     return;
   }
 
   store.setState({ roles: {} });
   updateRolesStatus('info', 'Загрузка...', '');
 
-  let roleFiles = [];
-  const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort(), 10000);
+  if (_rolesAbortController) _rolesAbortController.abort();
+  _rolesAbortController = new AbortController();
+  const to = setTimeout(() => _rolesAbortController.abort(), 10000);
 
+  let roleFiles = [];
   try {
-    const r = await fetch(baseUrl + 'roles.json', { signal: ctrl.signal });
+    const r = await fetch(baseUrl + 'roles.json', { signal: _rolesAbortController.signal });
     clearTimeout(to);
     if (r.ok) {
       const m = await r.json();
       if (m && Array.isArray(m.roles)) {
         store.setState({ manifest: m });
-        roleFiles = m.roles.map(x => x.file).filter(Boolean);
+        roleFiles = m.roles.map(x => x.file).filter(f => typeof f === 'string');
         updateRolesStatus('success', `Манифест: ${roleFiles.length} ролей`, '');
       } else throw new Error('bad manifest');
     } else throw new Error('not found');
   } catch (e) {
+    clearTimeout(to);
     if (e.name === 'AbortError') {
       updateRolesStatus('error', 'Таймаут (10с)', '');
       showToast('Таймаут загрузки', TOAST_TYPES.ERROR);
+      _rolesLoading = false;
       return;
     }
     updateRolesStatus('warning', 'Fallback-список', '');
     roleFiles = ['ROLE-001-security.md', 'ROLE-002-qa.md', 'ROLE-003-performance.md', 'ROLE-004-reviewer.md'];
+  } finally {
+    _rolesAbortController = null;
   }
 
   await loadRoleFiles(roleFiles, baseUrl);
+  _rolesLoading = false;
+}
+
+async function fetchRoleFile(baseUrl, file) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const r = await fetch(baseUrl + file, { signal: ctrl.signal });
+    clearTimeout(to);
+    if (!r.ok) return null;
+    const content = await r.text();
+    const m = file.match(/ROLE-\d+-(.+)\.md$/);
+    const roleName = m ? m[1] : file.replace(/\.md$/, '');
+    return { roleName, filename: file, content };
+  } catch {
+    clearTimeout(to);
+    return null;
+  }
 }
 
 async function loadRoleFiles(roleFiles, baseUrl) {
-  const results = await Promise.all(roleFiles.map(async (file) => {
-    try {
-      const r = await fetch(baseUrl + file);
-      if (!r.ok) return null;
-      const content = await r.text();
-      const m = file.match(/ROLE-\d+-(.+)\.md$/);
-      const roleName = m ? m[1] : file.replace(/\.md$/, '');
-      return { roleName, filename: file, content };
-    } catch { return null; }
-  }));
+  const CONCURRENCY = 5;
+  const results = [];
+
+  for (let i = 0; i < roleFiles.length; i += CONCURRENCY) {
+    const chunk = roleFiles.slice(i, i + CONCURRENCY);
+    const chunkResults = await Promise.all(chunk.map(f => fetchRoleFile(baseUrl, f)));
+    results.push(...chunkResults);
+  }
 
   let loaded = 0;
   const roles = {};
+  const seenNames = new Set();
   results.forEach(r => {
-    if (r) {
-      roles[r.roleName] = { filename: r.filename, content: r.content, id: r.roleName };
-      loaded++;
+    if (!r) return;
+    if (seenNames.has(r.roleName)) {
+      console.warn('Duplicate role name, skipping:', r.roleName);
+      return;
     }
+    seenNames.add(r.roleName);
+    roles[r.roleName] = { filename: r.filename, content: r.content, id: r.roleName };
+    loaded++;
   });
 
   store.setState({ roles });
@@ -967,10 +1006,7 @@ async function loadRoleFiles(roleFiles, baseUrl) {
     const names = Object.keys(roles).join(', ');
     updateRolesStatus('success', `${loaded} ролей загружено`, escapeHtml(names));
     showToast(`${loaded} ролей загружено`, TOAST_TYPES.SUCCESS);
-    // Переход на экран ввода
-    setTimeout(function() {
-      goToScreen('screen-input');
-    }, 400);
+    requestAnimationFrame(() => goToScreen('screen-input'));
   } else {
     updateRolesStatus('error', 'Ошибка загрузки', 'Проверьте путь. Для локального теста запустите: python3 -m http.server 8000');
     showToast('Роли не загружены — проверьте путь', TOAST_TYPES.ERROR);
@@ -985,7 +1021,7 @@ async function loadRolesFromFile(input) {
     const manifest = JSON.parse(text);
     if (!manifest || !Array.isArray(manifest.roles)) throw new Error('Неверная структура манифеста');
     store.setState({ manifest });
-    const roleFiles = manifest.roles.map(x => x.file).filter(Boolean);
+    const roleFiles = manifest.roles.map(x => x.file).filter(f => typeof f === 'string');
     updateRolesStatus('success', `Манифест: ${roleFiles.length} ролей`, '');
     showToast('Манифест загружен. Выберите .md файлы ролей.', TOAST_TYPES.SUCCESS);
     promptForMdFiles(roleFiles);
@@ -1000,23 +1036,40 @@ function promptForMdFiles(expectedFiles) {
   input.type = 'file';
   input.multiple = true;
   input.accept = '.md';
-  input.onchange = (e) => loadMdFiles(e.target.files, expectedFiles);
+  input.onchange = (e) => {
+    loadMdFiles(e.target.files, expectedFiles);
+    input.remove();
+  };
   input.click();
 }
 
 async function loadMdFiles(files, expectedFiles) {
   const fileMap = new Map();
-  for (const file of files) fileMap.set(file.name, file);
+  for (const file of files) {
+    if (!fileMap.has(file.name)) fileMap.set(file.name, file);
+  }
+
   const roles = {};
   let loaded = 0;
+  const seenNames = new Set();
+  const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB per file
 
   for (const fileName of expectedFiles) {
     const file = fileMap.get(fileName);
     if (!file) continue;
+    if (file.size > MAX_FILE_SIZE) {
+      console.warn('File too large, skipping:', fileName, file.size);
+      continue;
+    }
     try {
       const content = await file.text();
       const m = fileName.match(/ROLE-\d+-(.+)\.md$/);
       const roleName = m ? m[1] : fileName.replace(/\.md$/, '');
+      if (seenNames.has(roleName)) {
+        console.warn('Duplicate role name, skipping:', roleName);
+        continue;
+      }
+      seenNames.add(roleName);
       roles[roleName] = { filename: fileName, content, id: roleName };
       loaded++;
     } catch (e) { console.error('Failed to read', fileName, e); }
@@ -1028,9 +1081,7 @@ async function loadMdFiles(files, expectedFiles) {
     const names = Object.keys(roles).join(', ');
     updateRolesStatus('success', `${loaded} ролей загружено`, escapeHtml(names));
     showToast(`${loaded} ролей загружено`, TOAST_TYPES.SUCCESS);
-    setTimeout(function() {
-      goToScreen('screen-input');
-    }, 400);
+    requestAnimationFrame(() => goToScreen('screen-input'));
   } else {
     updateRolesStatus('error', 'Ошибка загрузки', 'Не найдены .md файлы из манифеста. Проверьте имена файлов.');
     showToast('Роли не загружены', TOAST_TYPES.ERROR);
@@ -1054,9 +1105,16 @@ function exportSession() {
   const a = document.createElement('a');
   a.href = url;
   a.download = `voyage_session_${new Date().toISOString().slice(0, 10)}.json`;
+  a.style.display = 'none';
+
+  const cleanup = () => {
+    if (a.parentNode) a.parentNode.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   document.body.appendChild(a);
   a.click();
-  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  requestAnimationFrame(cleanup);
   showToast('Сессия экспортирована', TOAST_TYPES.SUCCESS);
 }
 
@@ -1072,17 +1130,16 @@ function importSession(input) {
     const ok = store.importState(e.target.result);
     if (ok) {
       showToast('Сессия импортирована!', TOAST_TYPES.SUCCESS);
-      // Refresh UI
       const state = store.getState();
-      import('./ui.js').then(({ renderScreen }) => {
-        renderScreen(state.activeScreen);
-      });
+      renderScreen(state.activeScreen);
     } else {
       showToast('Некорректный файл', TOAST_TYPES.ERROR);
     }
   };
+  reader.onerror = () => showToast('Ошибка чтения файла', TOAST_TYPES.ERROR);
   reader.readAsText(file);
   input.value = '';
+}
 }
 
 function resetSession() {
