@@ -1208,6 +1208,7 @@ let _sectionEls = [];
 const _debouncers = {};
 
 function initUI() {
+  initLogInterceptor();
   console.log('[UI] initUI() called');
   _ui.app = document.getElementById('app');
   _ui.bottomBar = document.getElementById('bottom-bar');
@@ -1410,7 +1411,7 @@ function renderFinal() {
 function renderBottomBar() {
   if (!_ui.bottomBar) return;
   const state = store.getState();
-  const screens = ['screen-settings', 'screen-project', 'screen-input', 'screen-routing', 'screen-collector', 'screen-final'];
+  const screens = ['screen-settings', 'screen-project', 'screen-input', 'screen-routing', 'screen-collector', 'screen-final', 'screen-logs'];
   const current = state.activeScreen;
   const idx = screens.indexOf(current);
   
@@ -1447,6 +1448,7 @@ function goToScreen(screenId) {
     case 'screen-routing': renderRouting(); break;
     case 'screen-collector': renderCollector(); break;
     case 'screen-final': renderFinal(); break;
+    case 'screen-logs': renderLogs(); break;
   }
 }
 
@@ -1465,6 +1467,63 @@ function showToast(message, type) {
 
 function formatReport(analysis) {
   return JSON.stringify(analysis, null, 2);
+}
+// ===== LOGS / TESTING =====
+const _logs = [];
+const MAX_LOGS = 500;
+
+function initLogInterceptor() {
+  const origLog = console.log, origWarn = console.warn, origError = console.error, origInfo = console.info;
+  function addLog(type, args) {
+    const ts = new Date().toLocaleTimeString();
+    const msg = Array.from(args).map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    _logs.push(`[${ts}] [${type}] ${msg}`);
+    if (_logs.length > MAX_LOGS) _logs.shift();
+    const lc = document.getElementById('logs-container');
+    if (lc && lc.closest('.v-active')) renderLogs();
+  }
+  console.log = (...a) => { addLog('LOG', a); origLog.apply(console, a); };
+  console.warn = (...a) => { addLog('WARN', a); origWarn.apply(console, a); };
+  console.error = (...a) => { addLog('ERROR', a); origError.apply(console, a); };
+  console.info = (...a) => { addLog('INFO', a); origInfo.apply(console, a); };
+}
+
+function renderLogs() {
+  console.log('[UI] renderLogs()');
+  const c = document.getElementById('logs-container');
+  if (!c) return;
+  c.innerHTML = '';
+  const state = store.getState();
+  const roles = Object.keys(state.roles || {}).length;
+
+  const h = document.createElement('div');
+  h.innerHTML = `<h3>📋 Тестирование и логи</h3><p>Ролей: ${roles} | Логов: ${_logs.length}</p>`;
+  c.appendChild(h);
+
+  const sys = document.createElement('div');
+  sys.innerHTML = `<strong>System:</strong> ${navigator.userAgent}<br><strong>Screen:</strong> ${window.innerWidth}x${window.innerHeight}<br><strong>DecompressionStream:</strong> ${typeof DecompressionStream !== 'undefined' ? '✅' : '❌'}<<br><strong>Clipboard:</strong> ${navigator.clipboard ? '✅' : '❌'}`;
+  c.appendChild(sys);
+
+  const btns = document.createElement('div');
+  const b1 = document.createElement('button'); b1.textContent = '🧪 Загрузить роли'; b1.onclick = () => { console.log('[TEST] Загрузить роли'); showToast('Тест...', 'info'); if (typeof loadRoles === 'function') loadRoles(); }; btns.appendChild(b1);
+  const b2 = document.createElement('button'); b2.textContent = '🧪 Выбрать файл'; b2.onclick = () => { console.log('[TEST] Выбрать файл'); showToast('Тест...', 'info'); if (typeof promptForMdFiles === 'function') promptForMdFiles(); }; btns.appendChild(b2);
+  const b3 = document.createElement('button'); b3.textContent = '🧪 ZIP парсинг'; b3.onclick = () => { console.log('[TEST] ZIP'); showToast('Перетащите ZIP', 'info'); }; btns.appendChild(b3);
+  const b4 = document.createElement('button'); b4.textContent = '🗑️ Очистить логи'; b4.onclick = () => { _logs.length = 0; console.log('[TEST] Очищено'); renderLogs(); }; btns.appendChild(b4);
+  c.appendChild(btns);
+
+  const ta = document.createElement('textarea');
+  ta.id = 'logs-output'; ta.className = 'v-logs-textarea'; ta.readOnly = true;
+  ta.value = _logs.length === 0 ? 'Логи пусты. Нажмите кнопки тестирования.' : _logs.join('\n');
+  c.appendChild(ta);
+
+  const copyBtn = document.createElement('button');
+  copyBtn.textContent = '📋 Скопировать все логи';
+  copyBtn.onclick = () => {
+    if (typeof copyToClipboard === 'function') {
+      copyToClipboard(ta.value).then(() => showToast('Скопировано!', 'success'));
+    }
+  };
+  c.appendChild(copyBtn);
 }
 // ===== APP ENTRY =====
 // ============================================
