@@ -1205,7 +1205,6 @@ function resetSession() {
 // Selective re-rendering based on state slices
 // ============================================
 
-
 const SCREENS = {
   SETTINGS: 'screen-settings',
   PROJECT: 'screen-project',
@@ -1219,6 +1218,7 @@ const TOAST_TYPES = { ERROR: 'error', SUCCESS: 'success', WARN: 'warn', INFO: 'i
 
 let _ui = {};
 let _debouncers = {};
+let _sectionEls = [];
 
 function initUI() {
   _ui.bottomBar = document.getElementById('bottom-action-bar');
@@ -1226,6 +1226,9 @@ function initUI() {
   _ui.bottomStatus = document.getElementById('bottom-status');
   _ui.bottomHint = document.getElementById('bottom-hint');
   _ui.toast = document.getElementById('toast');
+
+  // Cache section elements
+  _sectionEls = Array.from(document.querySelectorAll('.v-section'));
 
   // Subscribe to state changes with selectors
   store.subscribe(renderScreen, s => s.activeScreen);
@@ -1243,12 +1246,11 @@ function initUI() {
 
 function renderScreen(screenId) {
   if (!screenId) screenId = store.getState().activeScreen;
-  document.querySelectorAll('.v-section').forEach(s => s.classList.remove('v-section--active'));
+  _sectionEls.forEach(s => s.classList.remove('v-section--active'));
   const el = document.getElementById(screenId);
   if (el) el.classList.add('v-section--active');
-  window.scrollTo(0, 0);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 
-  // Render screen-specific content
   switch (screenId) {
     case SCREENS.SETTINGS: renderSettings(); break;
     case SCREENS.PROJECT: renderProject(); break;
@@ -1257,6 +1259,11 @@ function renderScreen(screenId) {
     case SCREENS.COLLECTOR: renderCollector(); break;
     case SCREENS.FINAL: renderFinal(); break;
   }
+}
+
+function clearDebouncers() {
+  Object.values(_debouncers).forEach(d => { if (d && typeof d.cancel === 'function') d.cancel(); });
+  _debouncers = {};
 }
 
 function renderSettings() {
@@ -1268,12 +1275,17 @@ function renderSettings() {
   if (!statusEl) return;
 
   const roleCount = Object.keys(state.roles).length;
+  statusEl.innerHTML = '';
   if (roleCount > 0) {
     statusEl.className = 'v-alert v-alert--success v-mt-md';
-    statusEl.innerHTML = `<span class="v-alert__icon">✅</span><div class="v-alert__content"><strong>${roleCount} ролей загружено</strong></div>`;
+    statusEl.appendChild(domCreate('span', { className: 'v-alert__icon', text: '✅' }));
+    statusEl.appendChild(domCreate('div', { className: 'v-alert__content' }, [
+      domCreate('strong', { text: `${roleCount} ролей загружено` })
+    ]));
   } else {
     statusEl.className = 'v-alert v-alert--info v-mt-md';
-    statusEl.innerHTML = '<span class="v-alert__icon">ℹ️</span><div class="v-alert__content">Роли не загружены. Нажми «Загрузить роли» или выбери файл.</div>';
+    statusEl.appendChild(domCreate('span', { className: 'v-alert__icon', text: 'ℹ️' }));
+    statusEl.appendChild(domCreate('div', { className: 'v-alert__content', text: 'Роли не загружены. Нажми «Загрузить роли» или выбери файл.' }));
   }
 }
 
@@ -1287,7 +1299,10 @@ function renderProject() {
   // ZIP Drop Zone
   const dropZone = domCreate('div', {
     className: 'v-zip-drop',
-    id: 'zip-drop-zone'
+    id: 'zip-drop-zone',
+    role: 'button',
+    tabindex: '0',
+    'aria-label': 'Зона загрузки ZIP-архива. Нажмите Enter или пробел для выбора файла.'
   }, [
     domCreate('div', { className: 'v-zip-drop__icon', text: '📦' }),
     domCreate('div', { className: 'v-zip-drop__text', text: 'Перетащите ZIP-архив проекта сюда' }),
@@ -1297,20 +1312,30 @@ function renderProject() {
       accept: '.zip',
       id: 'zip-file-input',
       className: 'v-file-input',
-      change: handleZipSelect
+      'aria-hidden': 'true'
     })
   ]);
 
-  // Make drop zone clickable
-  dropZone.addEventListener('click', () => document.getElementById('zip-file-input').click());
-  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('v-zip-drop--drag'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('v-zip-drop--drag'));
+  const fileInput = dropZone.querySelector('#zip-file-input');
+  const activateDropZone = () => dropZone.classList.add('v-zip-drop--drag');
+  const deactivateDropZone = () => dropZone.classList.remove('v-zip-drop--drag');
+
+  dropZone.addEventListener('click', () => fileInput && fileInput.click());
+  dropZone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      fileInput && fileInput.click();
+    }
+  });
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); activateDropZone(); });
+  dropZone.addEventListener('dragleave', deactivateDropZone);
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
-    dropZone.classList.remove('v-zip-drop--drag');
+    deactivateDropZone();
     const file = e.dataTransfer.files[0];
     if (file && file.name.endsWith('.zip')) processZipFile(file);
   });
+  fileInput.addEventListener('change', handleZipSelect);
 
   container.appendChild(dropZone);
 
@@ -1333,7 +1358,6 @@ function renderProject() {
     });
     treeCard.appendChild(tree);
 
-    // Analyze button
     const analyzeBtn = domCreate('button', {
       className: 'v-btn v-btn--primary v-btn--block v-mt-md',
       text: '🔍 Анализировать зависимости',
@@ -1341,7 +1365,6 @@ function renderProject() {
     });
     treeCard.appendChild(analyzeBtn);
 
-    // Analysis report if exists
     if (state.dependencyGraph) {
       const reportCard = domCreate('div', { className: 'v-card v-mt-md' });
       const reportHeader = domCreate('div', { className: 'v-card__header' }, [
@@ -1386,6 +1409,7 @@ function renderRouting() {
   const countEl = document.getElementById('mandate-count');
   if (!container) return;
 
+  clearDebouncers();
   container.innerHTML = '';
   const roles = state.plan?.roles || {};
   if (countEl) countEl.textContent = Object.keys(roles).length + ' ролей';
@@ -1415,7 +1439,6 @@ function renderRouting() {
       id: `routing-card-${roleKey}`
     });
 
-    // Header
     const header = domCreate('div', { className: 'v-role__header' }, [
       domCreate('div', {}, [
         domCreate('h3', { className: 'v-role__name', text: `👤 ${roleKey}` }),
@@ -1428,14 +1451,12 @@ function renderRouting() {
     ]);
     card.appendChild(header);
 
-    // Focus areas
     const focusBox = domCreate('div', { className: 'v-role__focus' });
     mandate.focus_areas.forEach(f => {
       focusBox.appendChild(domCreate('div', { className: 'v-role__focus-item', text: f }));
     });
     card.appendChild(focusBox);
 
-    // Prompt box
     const promptBox = domCreate('div', { className: 'v-prompt-box' }, [
       domCreate('div', { className: 'v-prompt-box__label', text: '📋 Промпт для Kimi' }),
       domCreate('textarea', {
@@ -1443,6 +1464,8 @@ function renderRouting() {
         rows: '4',
         className: 'v-prompt-textarea',
         readonly: true,
+        'aria-label': `Промпт для роли ${roleKey}`,
+        'aria-readonly': 'true',
         text: promptText
       }),
       domCreate('div', { className: 'v-flex v-flex--gap-sm v-mt-sm' }, [
@@ -1462,7 +1485,6 @@ function renderRouting() {
     ]);
     card.appendChild(promptBox);
 
-    // Answer box
     const answerBox = domCreate('div', { className: 'v-answer-box' }, [
       domCreate('div', { className: 'v-answer-box__label', text: '✍️ Ответ роли' }),
       domCreate('textarea', {
@@ -1470,6 +1492,7 @@ function renderRouting() {
         rows: '5',
         className: 'v-answer-textarea',
         placeholder: `Вставь ответ Kimi для '${roleKey}'...`,
+        'aria-label': `Ответ роли ${roleKey}`,
         text: existing
       }),
       domCreate('div', {
@@ -1480,7 +1503,6 @@ function renderRouting() {
     ]);
     card.appendChild(answerBox);
 
-    // Bind input with debounce
     const ta = answerBox.querySelector(`#routing-feedback-${roleKey}`);
     if (ta) {
       ta.addEventListener('input', getDebouncer(roleKey, (value) => {
@@ -1498,6 +1520,7 @@ function renderCollector() {
   const progressEl = document.getElementById('collector-progress');
   if (!container) return;
 
+  clearDebouncers();
   container.innerHTML = '';
   const roles = state.plan?.roles || {};
   const total = Object.keys(roles).length;
@@ -1528,6 +1551,7 @@ function renderCollector() {
       rows: '6',
       className: 'v-textarea',
       placeholder: `Вставь ответ Kimi для «${roleKey.toUpperCase()}»`,
+      'aria-label': `Ответ роли ${roleKey} для сбора`,
       text: feedback
     });
     ta.addEventListener('input', getDebouncer(roleKey, (value) => {
@@ -1566,13 +1590,19 @@ function renderFinal() {
   const cw = document.getElementById('conflicts-warning');
   const nc = document.getElementById('no-conflicts');
   if (cw && nc) {
-    cw.classList.toggle('v-hidden', !hasConflicts);
-    nc.classList.toggle('v-hidden', hasConflicts);
+    if (hasConflicts) {
+      cw.classList.remove('v-hidden');
+      nc.classList.add('v-hidden');
+    } else {
+      cw.classList.add('v-hidden');
+      nc.classList.remove('v-hidden');
+    }
   }
 }
 
 function renderBottomBar(stateSlice) {
   const { plan, feedbacks, activeScreen } = stateSlice;
+  if (!_ui.bottomBar) return;
   const roles = plan ? Object.keys(plan.roles || {}) : [];
   const total = roles.length;
   let filled = 0;
@@ -1623,7 +1653,6 @@ function updateStatus(lastAction) {
   const el = document.getElementById('status-action');
   if (el) el.textContent = `Действие: ${lastAction}`;
 }
-
 // ===== ACTIONS =====
 
 function goToScreen(screenId) {
