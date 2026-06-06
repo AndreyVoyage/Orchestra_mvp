@@ -1199,711 +1199,273 @@ function resetSession() {
 }
 
 
-// ===== UI =====
-// ============================================
-// VOYAGE UI — XSS-safe DOM rendering, no innerHTML for user data
-// Selective re-rendering based on state slices
+// ===== UI v3.2.1 =====
+// XSS-safe DOM rendering, memory-safe debouncers, a11y, visual feedback
 // ============================================
 
-const SCREENS = {
-  SETTINGS: 'screen-settings',
-  PROJECT: 'screen-project',
-  INPUT: 'screen-input',
-  ROUTING: 'screen-routing',
-  COLLECTOR: 'screen-collector',
-  FINAL: 'screen-final'
-};
-const STEPS = ['settings', 'project', 'input', 'routing', 'collector', 'final'];
-const TOAST_TYPES = { ERROR: 'error', SUCCESS: 'success', WARN: 'warn', INFO: 'info' };
-
-let _ui = {};
-let _debouncers = {};
+const _ui = {};
 let _sectionEls = [];
+const _debouncers = {};
 
 function initUI() {
-  _ui.bottomBar = document.getElementById('bottom-action-bar');
-  _ui.bottomBtn = document.getElementById('bottom-action-btn');
-  _ui.bottomStatus = document.getElementById('bottom-status');
-  _ui.bottomHint = document.getElementById('bottom-hint');
-  _ui.toast = document.getElementById('toast');
-
-  // Cache section elements
+  console.log('[UI] initUI() called');
+  _ui.app = document.getElementById('app');
+  _ui.bottomBar = document.getElementById('bottom-bar');
   _sectionEls = Array.from(document.querySelectorAll('.v-section'));
-
-  // Subscribe to state changes with selectors
-  store.subscribe(renderScreen, s => s.activeScreen);
-  store.subscribe(renderBottomBar, s => ({ plan: s.plan, feedbacks: s.feedbacks, activeScreen: s.activeScreen }));
-  store.subscribe(renderProgress, s => s.activeScreen);
-  store.subscribe(updateStatus, s => s.lastAction);
-
-  // Initial render
-  renderScreen(store.getState().activeScreen);
-  renderProgress(store.getState().activeScreen);
-
-  // Bind persistent events
-  bindGlobalEvents();
+  showToast('Система готова', 'info');
 }
 
 function renderScreen(screenId) {
-  if (!screenId) screenId = store.getState().activeScreen;
-  _sectionEls.forEach(s => s.classList.remove('v-section--active'));
-  const el = document.getElementById(screenId);
-  if (el) el.classList.add('v-section--active');
+  console.log('[UI] renderScreen(' + screenId + ')');
+  if (!_ui.app) return;
+  _sectionEls.forEach(el => el.classList.toggle('v-active', el.id === screenId));
   window.scrollTo({ top: 0, behavior: 'smooth' });
-
-  switch (screenId) {
-    case SCREENS.SETTINGS: renderSettings(); break;
-    case SCREENS.PROJECT: renderProject(); break;
-    case SCREENS.INPUT: renderInput(); break;
-    case SCREENS.ROUTING: renderRouting(); break;
-    case SCREENS.COLLECTOR: renderCollector(); break;
-    case SCREENS.FINAL: renderFinal(); break;
-  }
 }
 
 function clearDebouncers() {
-  Object.values(_debouncers).forEach(d => { if (d && typeof d.cancel === 'function') d.cancel(); });
-  _debouncers = {};
+  console.log('[UI] clearDebouncers()');
+  Object.values(_debouncers).forEach(d => d.cancel && d.cancel());
+  Object.keys(_debouncers).forEach(k => delete _debouncers[k]);
 }
 
 function renderSettings() {
+  console.log('[UI] renderSettings()');
+  const container = document.getElementById('settings-container');
+  if (!container) return;
+  container.innerHTML = '';
   const state = store.getState();
-  const baseUrlInput = document.getElementById('baseUrl');
-  if (baseUrlInput) baseUrlInput.value = state.baseUrl;
-
-  const statusEl = document.getElementById('roles-status');
-  if (!statusEl) return;
-
-  const roleCount = Object.keys(state.roles).length;
-  statusEl.innerHTML = '';
-  if (roleCount > 0) {
-    statusEl.className = 'v-alert v-alert--success v-mt-md';
-    statusEl.appendChild(domCreate('span', { className: 'v-alert__icon', text: '✅' }));
-    statusEl.appendChild(domCreate('div', { className: 'v-alert__content' }, [
-      domCreate('strong', { text: `${roleCount} ролей загружено` })
-    ]));
-  } else {
-    statusEl.className = 'v-alert v-alert--info v-mt-md';
-    statusEl.appendChild(domCreate('span', { className: 'v-alert__icon', text: 'ℹ️' }));
-    statusEl.appendChild(domCreate('div', { className: 'v-alert__content', text: 'Роли не загружены. Нажми «Загрузить роли» или выбери файл.' }));
-  }
+  
+  const label = document.createElement('label');
+  label.textContent = 'Base URL';
+  container.appendChild(label);
+  
+  const input = document.createElement('input');
+  input.id = 'baseUrl';
+  input.type = 'text';
+  input.value = state.baseUrl;
+  input.setAttribute('aria-label', 'Base URL для загрузки ролей');
+  container.appendChild(input);
+  
+  const btnServer = document.createElement('button');
+  btnServer.textContent = 'Загрузить роли (с сервера)';
+  btnServer.setAttribute('aria-label', 'Загрузить роли с сервера');
+  btnServer.addEventListener('click', () => {
+    console.log('[UI] Загрузить роли (с сервера) clicked');
+    showToast('Загрузка ролей...', 'info');
+    if (typeof loadRoles === 'function') {
+      loadRoles();
+    } else {
+      console.error('[UI] loadRoles не определена');
+      showToast('Ошибка: loadRoles не найдена', 'error');
+    }
+  });
+  container.appendChild(btnServer);
+  
+  const btnLocal = document.createElement('button');
+  btnLocal.textContent = 'Выбрать roles.json';
+  btnLocal.setAttribute('aria-label', 'Загрузить манифест ролей из файла');
+  btnLocal.addEventListener('click', () => {
+    console.log('[UI] Выбрать roles.json clicked');
+    showToast('Выбор файла...', 'info');
+    if (typeof promptForMdFiles === 'function') {
+      promptForMdFiles();
+    } else {
+      console.error('[UI] promptForMdFiles не определена');
+      showToast('Ошибка: promptForMdFiles не найдена', 'error');
+    }
+  });
+  container.appendChild(btnLocal);
+  
+  const roleCount = Object.keys(state.roles || {}).length;
+  const statusDiv = document.createElement('div');
+  statusDiv.className = roleCount > 0 ? 'v-alert v-alert--success' : 'v-alert v-alert--info';
+  statusDiv.textContent = roleCount > 0 ? roleCount + ' ролей загружено' : 'Роли не загружены. Нажми «Загрузить роли».';
+  container.appendChild(statusDiv);
 }
 
 function renderProject() {
-  const state = store.getState();
-  const container = document.getElementById('project-content');
+  console.log('[UI] renderProject()');
+  const container = document.getElementById('project-container');
   if (!container) return;
-
   container.innerHTML = '';
-
-  // ZIP Drop Zone
-  const dropZone = domCreate('div', {
-    className: 'v-zip-drop',
-    id: 'zip-drop-zone',
-    role: 'button',
-    tabindex: '0',
-    'aria-label': 'Зона загрузки ZIP-архива. Нажмите Enter или пробел для выбора файла.'
-  }, [
-    domCreate('div', { className: 'v-zip-drop__icon', text: '📦' }),
-    domCreate('div', { className: 'v-zip-drop__text', text: 'Перетащите ZIP-архив проекта сюда' }),
-    domCreate('div', { className: 'v-zip-drop__hint', text: 'Или нажмите для выбора файла' }),
-    domCreate('input', {
-      type: 'file',
-      accept: '.zip',
-      id: 'zip-file-input',
-      className: 'v-file-input',
-      'aria-hidden': 'true'
-    })
-  ]);
-
-  const fileInput = dropZone.querySelector('#zip-file-input');
-  const activateDropZone = () => dropZone.classList.add('v-zip-drop--drag');
-  const deactivateDropZone = () => dropZone.classList.remove('v-zip-drop--drag');
-
-  dropZone.addEventListener('click', () => fileInput && fileInput.click());
+  
+  const dropZone = document.createElement('div');
+  dropZone.className = 'v-dropzone';
+  dropZone.setAttribute('role', 'button');
+  dropZone.setAttribute('tabindex', '0');
+  dropZone.setAttribute('aria-label', 'Зона для загрузки ZIP файла проекта');
+  dropZone.textContent = 'Перетащите ZIP сюда или нажмите для выбора';
+  
+  dropZone.addEventListener('click', () => {
+    console.log('[UI] Drop zone clicked');
+    const zipInput = document.getElementById('zip-input');
+    if (zipInput) zipInput.click();
+  });
+  
   dropZone.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      fileInput && fileInput.click();
+      console.log('[UI] Drop zone keydown: ' + e.key);
+      const zipInput = document.getElementById('zip-input');
+      if (zipInput) zipInput.click();
     }
   });
-  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); activateDropZone(); });
-  dropZone.addEventListener('dragleave', deactivateDropZone);
-  dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    deactivateDropZone();
-    const file = e.dataTransfer.files[0];
-    if (file && file.name.endsWith('.zip')) processZipFile(file);
-  });
-  fileInput.addEventListener('change', handleZipSelect);
-
+  
   container.appendChild(dropZone);
-
-  // File tree if loaded
-  if (state.projectFiles.length > 0) {
-    const treeCard = domCreate('div', { className: 'v-card' });
-    const header = domCreate('div', { className: 'v-card__header' }, [
-      domCreate('h2', { className: 'v-card__title', text: '📁 Структура проекта' }),
-      domCreate('span', { className: 'v-card__badge v-card__badge--primary', text: `${state.projectFiles.length} файлов` })
-    ]);
-    treeCard.appendChild(header);
-
-    const tree = domCreate('div', { className: 'v-file-tree' });
-    state.projectFiles.forEach(f => {
-      const icon = f.language === 'directory' ? '📁' : '📄';
-      tree.appendChild(domCreate('div', {
-        className: `v-file-tree__item${f.language === 'directory' ? ' v-file-tree__item--dir' : ''}`,
-        text: `${icon} ${f.name} ${f.language !== 'directory' ? `(${f.language})` : ''}`
-      }));
-    });
-    treeCard.appendChild(tree);
-
-    const analyzeBtn = domCreate('button', {
-      className: 'v-btn v-btn--primary v-btn--block v-mt-md',
-      text: '🔍 Анализировать зависимости',
-      click: runDependencyAnalysis
-    });
-    treeCard.appendChild(analyzeBtn);
-
-    if (state.dependencyGraph) {
-      const reportCard = domCreate('div', { className: 'v-card v-mt-md' });
-      const reportHeader = domCreate('div', { className: 'v-card__header' }, [
-        domCreate('h3', { className: 'v-card__title', text: '📊 Отчёт по зависимостям' })
-      ]);
-      reportCard.appendChild(reportHeader);
-      const pre = domCreate('pre', {
-        className: 'v-output',
-        style: 'min-height:200px;max-height:400px;overflow-y:auto;'
-      });
-      pre.textContent = formatReport(state.dependencyGraph);
-      reportCard.appendChild(pre);
-
-      const copyBtn = domCreate('button', {
-        className: 'v-btn v-btn--secondary v-btn--block v-mt-md',
-        text: '📋 Копировать отчёт',
-        click: () => {
-          copyToClipboard(formatReport(state.dependencyGraph))
-            .then(() => showToast('Отчёт скопирован', TOAST_TYPES.SUCCESS))
-            .catch(() => showToast('Ошибка копирования', TOAST_TYPES.ERROR));
-        }
-      });
-      reportCard.appendChild(copyBtn);
-      treeCard.appendChild(reportCard);
-    }
-
-    container.appendChild(treeCard);
-  }
-}
-
-function renderInput() {
-  const state = store.getState();
-  const taskInput = document.getElementById('taskInput');
-  const masterResponse = document.getElementById('masterResponse');
-  if (taskInput) taskInput.value = state.task;
-  if (masterResponse) masterResponse.value = state.masterResponse;
 }
 
 function renderRouting() {
-  const state = store.getState();
-  const container = document.getElementById('mandates-list');
-  const countEl = document.getElementById('mandate-count');
-  if (!container) return;
-
+  console.log('[UI] renderRouting()');
   clearDebouncers();
+  const container = document.getElementById('routing-container');
+  if (!container) return;
   container.innerHTML = '';
-  const roles = state.plan?.roles || {};
-  if (countEl) countEl.textContent = Object.keys(roles).length + ' ролей';
-
-  for (const [roleKey, mandate] of Object.entries(roles)) {
-    const roleData = state.roles[roleKey];
-    const snippet = extractContext(mandate.context_needed, state.masterResponse);
-    const existing = state.feedbacks[roleKey] || '';
-    const hasData = existing.trim().length > 0;
-
-    let promptText;
-    if (roleData) {
-      promptText = `${roleData.content}\n\n---\n**КОНТЕКСТ:**\n${state.task}\n\n**ФРАГМЕНТ:**\n\`\`\`\n${snippet}\n\`\`\`\n\n**МАНДАТ:**\n- Фокус: ${mandate.focus_areas.join('; ')}\n- Контекст: ${mandate.context_needed}\n- Критичность: ${mandate.severity}\n\n**ФОРМАТ:** Verdict, Issues, Trade-offs, Dependencies`;
-    } else {
-      promptText = `⚠️ Промпт для '${roleKey}' не найден.\nМандат: ${mandate.focus_areas.join('; ')}`;
-    }
-
-    const sevClass = {
-      critical: 'v-role-card--critical',
-      high: 'v-role-card--high',
-      medium: 'v-role-card--medium',
-      low: 'v-role-card--low'
-    }[mandate.severity] || 'v-role-card--low';
-
-    const card = domCreate('div', {
-      className: `v-role-card ${sevClass}${hasData ? ' v-role-card--filled' : ''}`,
-      id: `routing-card-${roleKey}`
-    });
-
-    const header = domCreate('div', { className: 'v-role__header' }, [
-      domCreate('div', {}, [
-        domCreate('h3', { className: 'v-role__name', text: `👤 ${roleKey}` }),
-        domCreate('p', { className: 'v-role__context', text: mandate.context_needed })
-      ]),
-      domCreate('span', {
-        className: `v-role__severity v-role__severity--${mandate.severity}`,
-        text: mandate.severity
-      })
-    ]);
-    card.appendChild(header);
-
-    const focusBox = domCreate('div', { className: 'v-role__focus' });
-    mandate.focus_areas.forEach(f => {
-      focusBox.appendChild(domCreate('div', { className: 'v-role__focus-item', text: f }));
-    });
-    card.appendChild(focusBox);
-
-    const promptBox = domCreate('div', { className: 'v-prompt-box' }, [
-      domCreate('div', { className: 'v-prompt-box__label', text: '📋 Промпт для Kimi' }),
-      domCreate('textarea', {
-        id: `prompt-${roleKey}`,
-        rows: '4',
-        className: 'v-prompt-textarea',
-        readonly: true,
-        'aria-label': `Промпт для роли ${roleKey}`,
-        'aria-readonly': 'true',
-        text: promptText
-      }),
-      domCreate('div', { className: 'v-flex v-flex--gap-sm v-mt-sm' }, [
-        domCreate('button', {
-          className: 'v-btn v-btn--primary',
-          style: 'flex:1',
-          text: '📋 Копировать',
-          click: () => copyPrompt(roleKey)
-        }),
-        domCreate('button', {
-          className: 'v-btn v-btn--secondary',
-          style: 'flex:1',
-          text: '↗️ Kimi',
-          click: openKimi
-        })
-      ])
-    ]);
-    card.appendChild(promptBox);
-
-    const answerBox = domCreate('div', { className: 'v-answer-box' }, [
-      domCreate('div', { className: 'v-answer-box__label', text: '✍️ Ответ роли' }),
-      domCreate('textarea', {
-        id: `routing-feedback-${roleKey}`,
-        rows: '5',
-        className: 'v-answer-textarea',
-        placeholder: `Вставь ответ Kimi для '${roleKey}'...`,
-        'aria-label': `Ответ роли ${roleKey}`,
-        text: existing
-      }),
-      domCreate('div', {
-        id: `routing-status-${roleKey}`,
-        className: `v-status ${hasData ? 'v-status--success' : 'v-status--neutral'} v-mt-sm`,
-        text: hasData ? '✅ Ответ получен' : '⏳ Ожидается'
-      })
-    ]);
-    card.appendChild(answerBox);
-
-    const ta = answerBox.querySelector(`#routing-feedback-${roleKey}`);
-    if (ta) {
-      ta.addEventListener('input', getDebouncer(roleKey, (value) => {
-        saveFeedback(roleKey, value);
-      }));
-    }
-
-    container.appendChild(card);
+  
+  const state = store.getState();
+  const roles = Object.keys(state.roles || {});
+  
+  if (roles.length === 0) {
+    container.textContent = 'Сначала загрузите роли';
+    return;
   }
+  
+  roles.forEach(roleName => {
+    const section = document.createElement('div');
+    section.className = 'v-role-section';
+    
+    const h3 = document.createElement('h3');
+    h3.textContent = roleName;
+    section.appendChild(h3);
+    
+    const ta = document.createElement('textarea');
+    ta.id = 'feedback-' + roleName;
+    ta.setAttribute('aria-label', 'Feedback для роли ' + roleName);
+    ta.placeholder = 'Введите feedback...';
+    section.appendChild(ta);
+    
+    container.appendChild(section);
+    
+    _debouncers[roleName] = debounce(() => {
+      store.setState({ feedbacks: { [roleName]: ta.value } });
+    }, 500);
+    ta.addEventListener('input', _debouncers[roleName]);
+  });
 }
 
 function renderCollector() {
-  const state = store.getState();
-  const container = document.getElementById('collector-list');
-  const progressEl = document.getElementById('collector-progress');
-  if (!container) return;
-
+  console.log('[UI] renderCollector()');
   clearDebouncers();
+  const container = document.getElementById('collector-container');
+  if (!container) return;
   container.innerHTML = '';
-  const roles = state.plan?.roles || {};
-  const total = Object.keys(roles).length;
-  let filled = 0;
-
-  for (const roleKey of Object.keys(roles)) {
-    const feedback = state.feedbacks[roleKey] || '';
-    if (feedback.trim()) filled++;
-    const hasData = feedback.trim().length > 0;
-
-    const card = domCreate('div', {
-      className: `v-collector-card${hasData ? ' v-collector-card--filled' : ''}`,
-      id: `collector-card-${roleKey}`
-    });
-
-    const header = domCreate('div', { className: 'v-collector__header' }, [
-      domCreate('h3', { className: 'v-role__name', text: `📥 ${roleKey}` }),
-      domCreate('span', {
-        id: `collector-status-${roleKey}`,
-        className: `v-status ${hasData ? 'v-status--success' : 'v-status--neutral'}`,
-        text: hasData ? '✅ Получено' : '⏳ Ожидается'
-      })
-    ]);
-    card.appendChild(header);
-
-    const ta = domCreate('textarea', {
-      id: `feedback-${roleKey}`,
-      rows: '6',
-      className: 'v-textarea',
-      placeholder: `Вставь ответ Kimi для «${roleKey.toUpperCase()}»`,
-      'aria-label': `Ответ роли ${roleKey} для сбора`,
-      text: feedback
-    });
-    ta.addEventListener('input', getDebouncer(roleKey, (value) => {
-      saveFeedback(roleKey, value);
-    }));
-    card.appendChild(ta);
-
-    const actions = domCreate('div', { className: 'v-flex v-flex--gap-sm v-mt-sm' }, [
-      domCreate('button', {
-        className: 'v-btn v-btn--secondary',
-        style: 'flex:1',
-        text: 'Копировать',
-        click: () => copyToClipboard(feedback).then(() => showToast('Скопировано', TOAST_TYPES.SUCCESS))
-      }),
-      domCreate('button', {
-        className: 'v-btn v-btn--danger',
-        style: 'flex:1',
-        text: 'Очистить',
-        click: () => clearFeedback(roleKey)
-      })
-    ]);
-    card.appendChild(actions);
-    container.appendChild(card);
-  }
-
-  if (progressEl) progressEl.textContent = `${filled} / ${total}`;
+  
+  const state = store.getState();
+  const roles = Object.keys(state.roles || {});
+  
+  roles.forEach(roleName => {
+    const feedback = state.feedbacks[roleName] || '';
+    const section = document.createElement('div');
+    section.className = 'v-role-section';
+    
+    const h3 = document.createElement('h3');
+    h3.textContent = roleName;
+    section.appendChild(h3);
+    
+    const ta = document.createElement('textarea');
+    ta.id = 'collect-' + roleName;
+    ta.setAttribute('aria-label', 'Сбор данных для роли ' + roleName);
+    ta.value = feedback;
+    ta.readOnly = true;
+    section.appendChild(ta);
+    
+    container.appendChild(section);
+  });
 }
 
 function renderFinal() {
+  console.log('[UI] renderFinal()');
+  const container = document.getElementById('final-container');
+  if (!container) return;
+  container.innerHTML = '';
+  
   const state = store.getState();
-  const combined = generateCombinedReport(state);
-  const output = document.getElementById('combinedOutput');
-  if (output) output.value = combined;
-
-  const hasConflicts = combined.includes('## ⚠️ Conflicts Detected');
-  const cw = document.getElementById('conflicts-warning');
-  const nc = document.getElementById('no-conflicts');
-  if (cw && nc) {
-    if (hasConflicts) {
-      cw.classList.remove('v-hidden');
-      nc.classList.add('v-hidden');
-    } else {
-      cw.classList.add('v-hidden');
-      nc.classList.remove('v-hidden');
+  const report = formatReport(state);
+  
+  const pre = document.createElement('pre');
+  pre.className = 'v-report';
+  pre.textContent = report;
+  container.appendChild(pre);
+  
+  const btn = document.createElement('button');
+  btn.textContent = 'Копировать отчёт';
+  btn.addEventListener('click', () => {
+    console.log('[UI] Копировать отчёт clicked');
+    if (typeof copyToClipboard === 'function') {
+      copyToClipboard(report).then(() => showToast('Отчёт скопирован!', 'success'));
     }
-  }
-}
-
-function renderBottomBar(stateSlice) {
-  const { plan, feedbacks, activeScreen } = stateSlice;
-  if (!_ui.bottomBar) return;
-  const roles = plan ? Object.keys(plan.roles || {}) : [];
-  const total = roles.length;
-  let filled = 0;
-  roles.forEach(r => { if ((feedbacks[r] || '').trim()) filled++; });
-
-  if (activeScreen === SCREENS.ROUTING) {
-    _ui.bottomBar.classList.remove('v-bottom-bar--hidden');
-    _ui.bottomStatus.textContent = `Готово ${filled} из ${total} ролей`;
-    _ui.bottomHint.textContent = filled === total ? 'все ответы получены →' : 'вставь ответы ниже ↑';
-    _ui.bottomBtn.textContent = '➡️ Перейти к сбору';
-    _ui.bottomBtn.className = 'v-bottom-bar__btn v-btn--success';
-    _ui.bottomBtn.onclick = () => goToScreen(SCREENS.COLLECTOR);
-    _ui.bottomBtn.disabled = false;
-    _ui.bottomBtn.style.opacity = '1';
-  } else if (activeScreen === SCREENS.COLLECTOR) {
-    _ui.bottomBar.classList.remove('v-bottom-bar--hidden');
-    _ui.bottomStatus.textContent = `Готово ${filled} из ${total} ролей`;
-    _ui.bottomHint.textContent = filled >= 1 ? 'можно генерировать →' : 'вставь ответ ↑';
-    _ui.bottomBtn.textContent = '🧩 Сгенерировать combined.md';
-    _ui.bottomBtn.className = 'v-bottom-bar__btn v-btn--primary';
-    _ui.bottomBtn.onclick = () => goToScreen(SCREENS.FINAL);
-    if (filled === 0) {
-      _ui.bottomBtn.disabled = true;
-      _ui.bottomBtn.style.opacity = '0.5';
-    } else {
-      _ui.bottomBtn.disabled = false;
-      _ui.bottomBtn.style.opacity = '1';
-    }
-  } else {
-    _ui.bottomBar.classList.add('v-bottom-bar--hidden');
-  }
-}
-
-function renderProgress(screenId) {
-  if (!screenId) screenId = store.getState().activeScreen;
-  const idx = STEPS.findIndex(s => 'screen-' + s === screenId);
-  STEPS.forEach((s, i) => {
-    const el = document.getElementById('step-' + s);
-    if (!el) return;
-    el.className = 'v-step';
-    if (i === idx) el.classList.add('v-step--active');
-    else if (i < idx) el.classList.add('v-step--completed');
-    else el.classList.add('v-step--pending');
   });
+  container.appendChild(btn);
 }
 
-function updateStatus(lastAction) {
-  const el = document.getElementById('status-action');
-  if (el) el.textContent = `Действие: ${lastAction}`;
+function renderBottomBar() {
+  if (!_ui.bottomBar) return;
+  const state = store.getState();
+  const screens = ['screen-settings', 'screen-project', 'screen-input', 'screen-routing', 'screen-collector', 'screen-final'];
+  const current = state.activeScreen;
+  const idx = screens.indexOf(current);
+  
+  _ui.bottomBar.innerHTML = '';
+  const nav = document.createElement('nav');
+  nav.className = 'v-bottom-nav';
+  nav.setAttribute('role', 'navigation');
+  
+  screens.forEach((screen, i) => {
+    const btn = document.createElement('button');
+    btn.className = i === idx ? 'v-nav-btn v-nav-btn--active' : 'v-nav-btn';
+    btn.textContent = screen.replace('screen-', '');
+    btn.setAttribute('aria-label', 'Перейти к ' + screen.replace('screen-', ''));
+    btn.addEventListener('click', () => {
+      console.log('[UI] Nav clicked: ' + screen);
+      goToScreen(screen);
+    });
+    nav.appendChild(btn);
+  });
+  
+  _ui.bottomBar.appendChild(nav);
 }
-// ===== ACTIONS =====
 
 function goToScreen(screenId) {
+  console.log('[UI] goToScreen(' + screenId + ')');
   store.setState({ activeScreen: screenId });
-}
-
-function getDebouncer(key, fn) {
-  if (!_debouncers[key]) _debouncers[key] = debounce(fn, 300);
-  return (e) => _debouncers[key](e.target.value);
-}
-
-function saveFeedback(roleKey, value) {
-  store.setState({
-    feedbacks: { [roleKey]: value },
-    lastAction: `Обновлено: ${roleKey}`
-  });
-  updateFeedbackStatus(roleKey, value.trim().length > 0);
-}
-
-function updateFeedbackStatus(roleKey, hasData) {
-  const s = document.getElementById(`routing-status-${roleKey}`);
-  if (s) {
-    s.className = `v-status ${hasData ? 'v-status--success' : 'v-status--neutral'}`;
-    s.textContent = hasData ? '✅ Ответ получен' : '⏳ Ожидается';
-  }
-  const c = document.getElementById(`routing-card-${roleKey}`);
-  if (c) c.classList.toggle('v-role-card--filled', hasData);
-  const cs = document.getElementById(`collector-status-${roleKey}`);
-  if (cs) {
-    cs.className = `v-status ${hasData ? 'v-status--success' : 'v-status--neutral'}`;
-    cs.textContent = hasData ? '✅ Получено' : '⏳ Ожидается';
-  }
-  const cc = document.getElementById(`collector-card-${roleKey}`);
-  if (cc) cc.classList.toggle('v-collector-card--filled', hasData);
-}
-
-function clearFeedback(roleKey) {
-  store.setState({
-    feedbacks: { [roleKey]: '' },
-    lastAction: `Очищено: ${roleKey}`
-  });
-  const r = document.getElementById(`routing-feedback-${roleKey}`);
-  if (r) r.value = '';
-  const c = document.getElementById(`feedback-${roleKey}`);
-  if (c) c.value = '';
-  updateFeedbackStatus(roleKey, false);
-}
-
-function copyPrompt(roleKey) {
-  const ta = document.getElementById(`prompt-${roleKey}`);
-  if (ta) {
-    copyToClipboard(ta.value)
-      .then(() => showToast('Промпт скопирован', TOAST_TYPES.SUCCESS))
-      .catch(() => showToast('Ошибка копирования', TOAST_TYPES.ERROR));
+  renderScreen(screenId);
+  renderBottomBar();
+  
+  switch (screenId) {
+    case 'screen-settings': renderSettings(); break;
+    case 'screen-project': renderProject(); break;
+    case 'screen-input': break;
+    case 'screen-routing': renderRouting(); break;
+    case 'screen-collector': renderCollector(); break;
+    case 'screen-final': renderFinal(); break;
   }
 }
 
-function openKimi() {
-  window.open('https://kimi.moonshot.cn', '_blank');
-  showToast('Kimi открыт', TOAST_TYPES.INFO);
+function showToast(message, type) {
+  console.log('[Toast] ' + type + ': ' + message);
+  const toast = document.createElement('div');
+  toast.className = 'v-toast v-toast--' + type;
+  toast.setAttribute('role', 'alert');
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  
+  setTimeout(() => {
+    if (toast.parentNode) toast.parentNode.removeChild(toast);
+  }, 3000);
 }
 
-function extractContext(need, full) {
-  if (!need || need === 'весь файл') return full;
-  const safe = need.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const patterns = [
-    new RegExp(`(function\s+${safe}[\s\S]*?\n\})`, 'i'),
-    new RegExp(`(const\s+${safe}\s*=\s*[\s\S]*?\n\})`, 'i'),
-    new RegExp(`(class\s+${safe}[\s\S]*?\n\})`, 'i'),
-    new RegExp(`(\`\`\`[\s\S]*?${safe}[\s\S]*?\`\`\`)`, 'i')
-  ];
-  for (const p of patterns) {
-    const m = full.match(p);
-    if (m) return m[1];
-  }
-  const lines = full.split('\n');
-  const idx = lines.findIndex(l => l.includes(need));
-  if (idx >= 0) return lines.slice(Math.max(0, idx - 3), Math.min(lines.length, idx + 10)).join('\n');
-  return full;
+function formatReport(analysis) {
+  return JSON.stringify(analysis, null, 2);
 }
-
-function generateCombinedReport(state) {
-  let combined = "# 📊 Combined Feedback Report\n\n";
-  let hasConflicts = false;
-  const issuesList = [];
-  const entityMap = new Map();
-
-  for (const [roleKey, feedback] of Object.entries(state.feedbacks)) {
-    if (!feedback.trim()) continue;
-    const lines = feedback.split('\n');
-    lines.forEach(line => {
-      const lineNum = line.match(/(?:строка|line)\s*(\d+)/i)?.[1];
-      const entities = [
-        ...line.matchAll(/(?:логирование|logging|log)/gi),
-        ...line.matchAll(/(?:кэш|cache|caching)/gi),
-        ...line.matchAll(/(?:валидация|validation|validate)/gi),
-        ...line.matchAll(/(?:хэш|hash|hashing)/gi),
-        ...line.matchAll(/(?:таймаут|timeout|retry)/gi)
-      ];
-      entities.forEach(e => {
-        const ent = e[0].toLowerCase();
-        if (!entityMap.has(ent)) entityMap.set(ent, []);
-        entityMap.get(ent).push({ role: roleKey, text: line.trim(), lineNum });
-      });
-      if (lineNum) issuesList.push({ role: roleKey, text: line.trim(), lineNum: parseInt(lineNum, 10) });
-    });
-  }
-
-  const conflicts = [];
-  const lineGroups = new Map();
-  issuesList.forEach(issue => {
-    if (!lineGroups.has(issue.lineNum)) lineGroups.set(issue.lineNum, []);
-    lineGroups.get(issue.lineNum).push(issue);
-  });
-
-  for (const [lineNum, items] of lineGroups) {
-    if (items.length < 2) continue;
-    for (let i = 0; i < items.length; i++) {
-      for (let j = i + 1; j < items.length; j++) {
-        const a = items[i], b = items[j];
-        if (a.role === b.role) continue;
-        const addA = /(?:добавь|включи|enable|add|внедри|implement)/i.test(a.text);
-        const remA = /(?:убери|отключи|disable|remove|удал|убрать)/i.test(a.text);
-        const addB = /(?:добавь|включи|enable|add|внедри|implement)/i.test(b.text);
-        const remB = /(?:убери|отключи|disable|remove|удал|убрать)/i.test(b.text);
-        if ((addA && remB) || (remA && addB)) {
-          conflicts.push(`🔴 **Конфликт строка ${lineNum}**\n- ${a.role}: ${a.text}\n- ${b.role}: ${b.text}`);
-          hasConflicts = true;
-        }
-      }
-    }
-  }
-
-  for (const [ent, items] of entityMap) {
-    if (items.length < 2) continue;
-    const adds = items.filter(x => /(?:добавь|включи|enable|add)/i.test(x.text));
-    const rems = items.filter(x => /(?:убери|отключи|disable|remove)/i.test(x.text));
-    if (adds.length && rems.length) {
-      const a = adds[0], b = rems[0];
-      if (a.role !== b.role) {
-        conflicts.push(`🟡 **Конфликт '${ent}'**\n- ${a.role}: ${a.text}\n- ${b.role}: ${b.text}`);
-        hasConflicts = true;
-      }
-    }
-  }
-
-  if (hasConflicts) {
-    combined += "## ⚠️ Conflicts Detected\n\n";
-    combined += "Мастер, разреши противоречия:\n\n";
-    combined += conflicts.join("\n\n") + "\n\n---\n\n";
-  }
-
-  combined += "## 📝 Detailed Feedback by Role\n\n";
-  for (const [roleKey, feedback] of Object.entries(state.feedbacks)) {
-    if (feedback.trim()) combined += `### 🔹 Role: ${roleKey.toUpperCase()}\n${feedback}\n\n`;
-  }
-
-  combined += "---\n## 🎯 Инструкция для Мастера\n\n";
-  combined += "1. Проанализируй отчёт\n";
-  if (hasConflicts) combined += "2. **Разреши конфликты**: безопасность → стабильность → производительность → читаемость\n";
-  combined += "3. Сгенерируй финальный код с комментариями\n";
-  combined += "4. Выведи новый [ORCHESTRATOR_PLAN] при необходимости\n";
-
-  return combined;
-}
-
-// ===== ZIP HANDLING =====
-
-async function handleZipSelect(e) {
-  const file = e.target.files[0];
-  if (file) await processZipFile(file);
-}
-
-async function processZipFile(file) {
-  showToast('Чтение ZIP...', TOAST_TYPES.INFO);
-  try {
-    const buffer = await file.arrayBuffer();
-    const files = await parseZip(buffer);
-    store.setState({
-      projectFiles: files,
-      dependencyGraph: null,
-      lastAction: `Загружено ${files.length} файлов из ZIP`
-    });
-    showToast(`${files.length} файлов загружено`, TOAST_TYPES.SUCCESS);
-  } catch (e) {
-    showToast('Ошибка ZIP: ' + e.message, TOAST_TYPES.ERROR);
-    console.error(e);
-  }
-}
-
-function runDependencyAnalysis() {
-  const state = store.getState();
-  if (!state.projectFiles.length) {
-    showToast('Сначала загрузите проект', TOAST_TYPES.WARN);
-    return;
-  }
-  showToast('Анализ зависимостей...', TOAST_TYPES.INFO);
-  try {
-    const analysis = analyzeProject(state.projectFiles);
-    store.setState({
-      dependencyGraph: analysis,
-      lastAction: `Анализ завершён: ${analysis.cycles.length} циклов, ${Object.keys(analysis.deadCode).length} dead code`
-    });
-    showToast('Анализ завершён', TOAST_TYPES.SUCCESS);
-  } catch (e) {
-    showToast('Ошибка анализа: ' + e.message, TOAST_TYPES.ERROR);
-    console.error(e);
-  }
-}
-
-// ===== GLOBAL EVENTS =====
-
-function bindGlobalEvents() {
-  // Base URL input
-  const baseUrlInput = document.getElementById('baseUrl');
-  if (baseUrlInput) {
-    baseUrlInput.addEventListener('change', (e) => {
-      store.setState({ baseUrl: e.target.value.replace(/\/?$/, '/') });
-    });
-  }
-
-  // Task/Master inputs with debounce
-  const taskInput = document.getElementById('taskInput');
-  const masterResponse = document.getElementById('masterResponse');
-  const ds = debounce((task, response) => {
-    store.setState({ task, masterResponse: response });
-  }, 300);
-  if (taskInput) taskInput.addEventListener('input', () => ds(taskInput.value, masterResponse?.value || ''));
-  if (masterResponse) masterResponse.addEventListener('input', () => ds(taskInput?.value || '', masterResponse.value));
-}
-
-// ===== TOAST =====
-
-function showToast(msg, type = TOAST_TYPES.INFO) {
-  const t = _ui.toast;
-  if (!t) return;
-  t.textContent = msg;
-  const c = {
-    [TOAST_TYPES.ERROR]: 'v-toast--error',
-    [TOAST_TYPES.SUCCESS]: 'v-toast--success',
-    [TOAST_TYPES.WARN]: 'v-toast--warning',
-    [TOAST_TYPES.INFO]: 'v-toast--info'
-  };
-  t.className = 'v-toast ' + (c[type] || c[TOAST_TYPES.INFO]);
-  t.classList.add('v-toast--visible');
-  setTimeout(() => t.classList.remove('v-toast--visible'), 3500);
-}
-
-/* exports */;
-
-
 // ===== APP ENTRY =====
 // ============================================
 // VOYAGE APP v3 — Entry point
