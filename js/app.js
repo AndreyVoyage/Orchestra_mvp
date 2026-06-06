@@ -164,112 +164,128 @@ function safeJsonParse(str) {
 }
 
 
-// ===== STATE =====
+// ===== STATE v3.2 =====
+// Immutable store with localStorage backup, selective subscriptions, memory safety
 // ============================================
-// VOYAGE STATE — Immutable store with selective subscriptions
-// ============================================
 
+const STORAGE_KEY = 'voyage_state';
+const STORAGE_MAX = 4 * 1024 * 1024; // 4 MB localStorage limit
 
-const DEFAULT_STATE = {
-  baseUrl: './prompts/',
-  roles: {},
-  manifest: null,
-  task: '',
-  masterResponse: '',
-  plan: null,
-  feedbacks: {},
-  activeScreen: 'screen-settings',
-  projectFiles: [], // { name, content, language }
-  dependencyGraph: null,
-  lastAction: 'Система готова'
-};
+const store = (() => {
+  const DEFAULT_STATE = {
+    baseUrl: './prompts/',
+    task: '',
+    masterResponse: '',
+    plan: null,
+    roles: {},
+    feedbacks: {},
+    projectFiles: [],
+    dependencyGraph: null,
+    activeScreen: 'screen-settings',
+    lastAction: ''
+  };
 
-class StateManager {
-  constructor() {
-    this._state = Object.freeze({ ...DEFAULT_STATE });
-    this._listeners = [];
-    this._load();
-  }
+  let state = loadFromStorage() || { ...DEFAULT_STATE };
+  const listeners = new Map();
+  let batchTimer = null;
+  let pending = {};
+  let listenerId = 0;
 
-  getState() {
-    return this._state;
-  }
-
-  setState(partial) {
-    const next = { ...this._state, ...partial };
-    // Deep merge for nested objects if needed
-    if (partial.feedbacks) next.feedbacks = { ...this._state.feedbacks, ...partial.feedbacks };
-    if (partial.roles) next.roles = { ...this._state.roles, ...partial.roles };
-    if (partial.projectFiles) next.projectFiles = [...partial.projectFiles];
-    if (partial.dependencyGraph) next.dependencyGraph = { ...partial.dependencyGraph };
-    this._state = Object.freeze(next);
-    this._notify();
-    this._save();
-  }
-
-  subscribe(listener, selector = null) {
-    this._listeners.push({ listener, selector });
-    return () => { this._listeners = this._listeners.filter(l => l.listener !== listener); };
-  }
-
-  _notify() {
-    const state = this._state;
-    this._listeners.forEach(({ listener, selector }) => {
-      try {
-        listener(selector ? selector(state) : state);
-      } catch (e) { console.error('State listener error', e); }
-    });
-  }
-
-  _save() {
+  function loadFromStorage() {
     try {
-      const payload = JSON.stringify(this._state);
-      if (new Blob([payload]).size > 4 * 1024 * 1024) {
-        console.warn('State too large for localStorage');
-        return;
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return validateImportedState(parsed) ? parsed : null;
+    } catch { return null; }
+  }
+
+  function saveToStorage() {
+    try {
+      const json = JSON.stringify(state);
+      if (json.length > STORAGE_MAX) {
+        console.warn('State too large for localStorage:', json.length, 'bytes');
+        return false;
       }
-      const doSave = () => localStorage.setItem('voyage_orchestrator_v3', payload);
-      if (window.requestIdleCallback) requestIdleCallback(doSave, { timeout: 2000 });
-      else setTimeout(doSave, 0);
+      localStorage.setItem(STORAGE_KEY, json);
+      return true;
     } catch (e) {
-      console.error('Save failed', e);
+      console.warn('localStorage save failed:', e.message);
+      return false;
     }
   }
 
-  _load() {
-    try {
-      const raw = localStorage.getItem('voyage_orchestrator_v3');
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (validateImportedState(parsed)) {
-        this._state = Object.freeze({ ...DEFAULT_STATE, ...parsed });
+  function deepMerge(target, source) {
+    const result = { ...target };
+    for (const key of Object.keys(source)) {
+      if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+        result[key] = deepMerge(target[key] || {}, source[key]);
+      } else {
+        result[key] = source[key];
       }
-    } catch (e) { console.error('Load failed', e); }
+    }
+    return result;
   }
 
-  exportState() {
-    return JSON.stringify(this._state, null, 2);
+  function notify(changedKeys) {
+    listeners.forEach(({ fn, selector }) => {
+      try {
+        const selected = selector ? selector(state) : state;
+        fn(selected, changedKeys);
+      } catch (e) { console.error('State listener error:', e); }
+    });
   }
 
-  importState(json) {
-    try {
-      const parsed = JSON.parse(json);
-      if (validateImportedState(parsed)) {
-        this.setState({ ...DEFAULT_STATE, ...parsed });
+  return {
+    getState: () => state,
+
+    setState: (patch) => {
+      pending = deepMerge(pending, patch);
+      if (batchTimer) clearTimeout(batchTimer);
+      batchTimer = setTimeout(() => {
+        const changedKeys = Object.keys(pending);
+        state = deepMerge(state, pending);
+        pending = {};
+        saveToStorage();
+        notify(changedKeys);
+      }, 50);
+    },
+
+    subscribe: (fn, selector) => {
+      const id = ++listenerId;
+      listeners.set(id, { fn, selector });
+      return () => { listeners.delete(id); };
+    },
+
+    exportState: () => {
+      const json = JSON.stringify(state);
+      if (json.length > STORAGE_MAX) {
+        console.warn('Export too large:', json.length);
+      }
+      return json;
+    },
+
+    importState: (json) => {
+      try {
+        const parsed = JSON.parse(json);
+        if (!validateImportedState(parsed)) return false;
+        state = deepMerge(DEFAULT_STATE, parsed);
+        saveToStorage();
+        notify(Object.keys(parsed));
         return true;
+      } catch (e) {
+        console.error('Import failed:', e);
+        return false;
       }
-      return false;
-    } catch { return false; }
-  }
+    },
 
-  reset() {
-    localStorage.removeItem('voyage_orchestrator_v3');
-    this._state = Object.freeze({ ...DEFAULT_STATE });
-    this._notify();
-  }
-}
-
-const store = new StateManager();
+    reset: () => {
+      state = { ...DEFAULT_STATE };
+      localStorage.removeItem(STORAGE_KEY);
+      notify(Object.keys(state));
+    }
+  };
+})();
 
 
 // ===== ZIP LOADER =====
