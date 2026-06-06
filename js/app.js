@@ -7,86 +7,160 @@
 (function() {
 'use strict';
 
-// ===== UTILS =====
 // ============================================
-// VOYAGE UTILS — XSS-safe helpers, validators
+// VOYAGE UTILS v3.2 — Объединённый аудит
+// Исправления от: Kimi Code + Master Architect
 // ============================================
 
 function debounce(fn, ms) {
+  if (typeof fn !== 'function') throw new TypeError('debounce: fn must be a function');
+  ms = Math.max(0, Number(ms) || 0);
   let t;
-  const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  const d = function(...a) {
+    clearTimeout(t);
+    t = setTimeout(() => fn.apply(this, a), ms);
+  };
   d.cancel = () => clearTimeout(t);
   return d;
 }
 
 function escapeHtml(s) {
   if (s == null) return '';
+  if (typeof s !== 'string' && typeof s !== 'number') return '';
   return String(s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/'/g, '&#39;')
+    .replace(/`/g, '&#x60;');
 }
 
 function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(s).replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
 }
 
 function isValidBaseUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return false;
   try {
     const p = new URL(url, window.location.href);
     if (p.protocol === 'file:' && window.location.protocol !== 'file:') return false;
-    const f = ['javascript:', 'data:', 'vbscript:', 'about:'];
-    if (f.some(x => p.protocol === x)) return false;
+    const forbidden = ['javascript:', 'data:', 'vbscript:', 'about:', 'blob:'];
+    if (forbidden.some(x => p.protocol === x)) return false;
     return ['http:', 'https:', 'file:'].includes(p.protocol);
   } catch { return false; }
 }
 
-function validateImportedState(obj) {
+function validateImportedState(obj, maxDepth = 20) {
   if (!obj || typeof obj !== 'object') return false;
-  if (obj.__proto__ !== Object.prototype) return false;
+  if (Object.prototype.toString.call(obj) !== '[object Object]') return false;
+
   const bad = ['__proto__', 'constructor', 'prototype'];
-  const hasBad = (o) => {
+  const seen = new WeakSet();
+
+  function hasBad(o, depth) {
+    if (depth > maxDepth) return true;
     if (!o || typeof o !== 'object') return false;
-    return Object.keys(o).some(k => bad.includes(k)) || Object.values(o).some(v => typeof v === 'object' && hasBad(v));
-  };
-  if (hasBad(obj)) return false;
+    if (seen.has(o)) return false;
+    seen.add(o);
+
+    for (const key of Object.keys(o)) {
+      if (bad.includes(key)) return true;
+      const val = o[key];
+      if (val && typeof val === 'object') {
+        if (Object.prototype.toString.call(val) !== '[object Object]' && !Array.isArray(val)) {
+          return true;
+        }
+        if (hasBad(val, depth + 1)) return true;
+      }
+    }
+    return false;
+  }
+
+  if (hasBad(obj, 0)) return false;
+
   if (obj.baseUrl !== undefined && typeof obj.baseUrl !== 'string') return false;
   if (obj.task !== undefined && typeof obj.task !== 'string') return false;
   if (obj.masterResponse !== undefined && typeof obj.masterResponse !== 'string') return false;
-  if (obj.feedbacks !== undefined && (typeof obj.feedbacks !== 'object' || Array.isArray(obj.feedbacks))) return false;
+  if (obj.feedbacks !== undefined && (typeof obj.feedbacks !== 'object' || Array.isArray(obj.feedbacks) || obj.feedbacks === null)) return false;
   return true;
 }
 
 function domCreate(tag, attrs = {}, children = []) {
   const el = document.createElement(tag);
+  const dangerousUrlAttrs = ['href', 'src', 'action', 'formaction'];
+  const dangerousProto = /^\s*(javascript|data:text\/html|vbscript):/i;
+
   for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'text') el.textContent = v;
-    else if (k === 'html') el.innerHTML = v; // use only with trusted content
-    else if (k === 'className') el.className = v;
-    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
-    else el.setAttribute(k, v);
+    if (k === 'text') {
+      el.textContent = v;
+    } else if (k === 'className') {
+      el.setAttribute('class', v);
+    } else if (k === 'htmlFor') {
+      el.setAttribute('for', v);
+    } else if (k.startsWith('on') && typeof v === 'function') {
+      const eventName = k.slice(2).toLowerCase();
+      el.addEventListener(eventName, v);
+    } else if (k.startsWith('on') && typeof v === 'string') {
+      continue;
+    } else if (dangerousUrlAttrs.includes(k) && typeof v === 'string' && dangerousProto.test(v)) {
+      continue;
+    } else if (k.startsWith('data-') || k.startsWith('aria-')) {
+      el.setAttribute(k, v);
+    } else {
+      el.setAttribute(k, v);
+    }
   }
-  children.forEach(c => el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+
+  children.forEach(c => {
+    if (c == null) return;
+    el.appendChild(
+      typeof c === 'string' || typeof c === 'number' || typeof c === 'boolean'
+        ? document.createTextNode(String(c))
+        : c
+    );
+  });
   return el;
 }
 
 function copyToClipboard(text) {
   return new Promise((resolve, reject) => {
+    const str = String(text);
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(resolve).catch(reject);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand('copy'); resolve(); } catch (e) { reject(e); }
-      document.body.removeChild(ta);
+      navigator.clipboard.writeText(str).then(resolve).catch(reject);
+      return;
+    }
+    if (!document.body) {
+      reject(new Error('document.body is not available'));
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = str;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;';
+    ta.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      const ok = document.execCommand('copy');
+      ok ? resolve() : reject(new Error('execCommand copy failed'));
+    } catch (e) {
+      reject(e);
+    } finally {
+      if (ta.parentNode) document.body.removeChild(ta);
     }
   });
+}
+
+function generateId(prefix = 'voyage') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function safeJsonParse(str) {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return null;
+  }
 }
 
 
