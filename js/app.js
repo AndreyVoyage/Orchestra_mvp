@@ -892,211 +892,199 @@ function formatReport(analysis) {
 const TOAST_TYPES = { ERROR: 'error', SUCCESS: 'success', WARN: 'warn', INFO: 'info' };
 
 let _rolesAbortController = null;
+// ===== IMPORTER v3.2 =====
+// Role loading with concurrency limit, abort control, memory safety
+// ============================================
+
+const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB
+const CONCURRENCY_LIMIT = 5;
+
 let _rolesLoading = false;
+let _rolesAbortController = null;
 
 function normalizeBaseUrl(url) {
-  return (url || './prompts/').replace(/\/+$/, '') + '/';
+  if (typeof url !== 'string') return './prompts/';
+  return url.replace(/\/+$/, '') + '/';
 }
 
-async function loadRoles() {
+async function fetchRoleFile(url, signal) {
+  const to = setTimeout(() => signal.abort(), 10000);
+  try {
+    const res = await fetch(url, { signal });
+    clearTimeout(to);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } catch (e) {
+    clearTimeout(to);
+    throw e;
+  }
+}
+
+async function loadRoles(baseUrl = store.getState().baseUrl) {
   if (_rolesLoading) {
-    showToast('Загрузка уже идёт', TOAST_TYPES.WARN);
+    showToast('Загрузка уже идёт...', 'warning');
     return;
   }
   _rolesLoading = true;
-
-  const baseUrl = normalizeBaseUrl(document.getElementById('baseUrl')?.value);
-  store.setState({ baseUrl, lastAction: 'Загрузка ролей...' });
-
-  if (!isValidBaseUrl(baseUrl)) {
-    showToast('Некорректный URL', TOAST_TYPES.ERROR);
-    updateRolesStatus('error', 'Некорректный URL', 'Проверьте путь');
-    _rolesLoading = false;
-    return;
-  }
-
-  if (window.location.protocol === 'file:') {
-    showToast('Локальный файл: используйте кнопку «Выбрать roles.json»', TOAST_TYPES.WARN);
-    updateRolesStatus('warning', 'Локальный режим (file://)', 'fetch() заблокирован браузером. Нажмите кнопку «Выбрать roles.json» ниже, чтобы загрузить роли вручную.');
-    _rolesLoading = false;
-    return;
-  }
-
-  store.setState({ roles: {} });
-  updateRolesStatus('info', 'Загрузка...', '');
-
   if (_rolesAbortController) _rolesAbortController.abort();
   _rolesAbortController = new AbortController();
-  const to = setTimeout(() => _rolesAbortController.abort(), 10000);
 
-  let roleFiles = [];
+  const normalized = normalizeBaseUrl(baseUrl);
+  store.setState({ baseUrl: normalized, lastAction: 'loadRoles' });
+
   try {
-    const r = await fetch(baseUrl + 'roles.json', { signal: _rolesAbortController.signal });
-    clearTimeout(to);
-    if (r.ok) {
-      const m = await r.json();
-      if (m && Array.isArray(m.roles)) {
-        store.setState({ manifest: m });
-        roleFiles = m.roles.map(x => x.file).filter(f => typeof f === 'string');
-        updateRolesStatus('success', `Манифест: ${roleFiles.length} ролей`, '');
-      } else throw new Error('bad manifest');
-    } else throw new Error('not found');
+    const manifestUrl = normalized + 'roles.json';
+    const manifestRes = await fetchRoleFile(manifestUrl, _rolesAbortController.signal);
+    const manifest = JSON.parse(manifestRes);
+    const files = manifest.files || manifest;
+    await loadRoleFiles(files, normalized);
   } catch (e) {
-    clearTimeout(to);
-    if (e.name === 'AbortError') {
-      updateRolesStatus('error', 'Таймаут (10с)', '');
-      showToast('Таймаут загрузки', TOAST_TYPES.ERROR);
-      _rolesLoading = false;
-      return;
-    }
-    updateRolesStatus('warning', 'Fallback-список', '');
-    roleFiles = ['ROLE-001-security.md', 'ROLE-002-qa.md', 'ROLE-003-performance.md', 'ROLE-004-reviewer.md'];
+    console.warn('Manifest failed, using fallback:', e.message);
+    const fallback = ['security.md', 'frontend.md', 'backend.md', 'devops.md'];
+    await loadRoleFiles(fallback, normalized);
   } finally {
+    _rolesLoading = false;
     _rolesAbortController = null;
   }
-
-  await loadRoleFiles(roleFiles, baseUrl);
-  _rolesLoading = false;
 }
 
-async function fetchRoleFile(baseUrl, file) {
-  const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort(), 10000);
-  try {
-    const r = await fetch(baseUrl + file, { signal: ctrl.signal });
-    clearTimeout(to);
-    if (!r.ok) return null;
-    const content = await r.text();
-    const m = file.match(/ROLE-\d+-(.+)\.md$/);
-    const roleName = m ? m[1] : file.replace(/\.md$/, '');
-    return { roleName, filename: file, content };
-  } catch {
-    clearTimeout(to);
-    return null;
-  }
-}
-
-async function loadRoleFiles(roleFiles, baseUrl) {
-  const CONCURRENCY = 5;
-  const results = [];
-
-  for (let i = 0; i < roleFiles.length; i += CONCURRENCY) {
-    const chunk = roleFiles.slice(i, i + CONCURRENCY);
-    const chunkResults = await Promise.all(chunk.map(f => fetchRoleFile(baseUrl, f)));
-    results.push(...chunkResults);
+async function loadRoleFiles(files, baseUrl) {
+  const seen = new Set();
+  const chunks = [];
+  for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
+    chunks.push(files.slice(i, i + CONCURRENCY_LIMIT));
   }
 
-  let loaded = 0;
-  const roles = {};
-  const seenNames = new Set();
-  results.forEach(r => {
-    if (!r) return;
-    if (seenNames.has(r.roleName)) {
-      console.warn('Duplicate role name, skipping:', r.roleName);
-      return;
+  for (const chunk of chunks) {
+    const results = await Promise.all(
+      chunk.map(async (file) => {
+        const roleName = file.replace(/\.md$/i, '').replace(/^ROLE-\d+-/i, '');
+        if (seen.has(roleName)) {
+          console.warn(`Duplicate role skipped: ${roleName}`);
+          return null;
+        }
+        seen.add(roleName);
+
+        try {
+          const text = await fetchRoleFile(baseUrl + file, _rolesAbortController.signal);
+          return { roleName, text };
+        } catch (e) {
+          console.warn(`Failed to load ${file}:`, e.message);
+          return null;
+        }
+      })
+    );
+
+    const valid = results.filter(Boolean);
+    if (valid.length) {
+      const patch = {};
+      valid.forEach(({ roleName, text }) => {
+        patch[roleName] = text;
+      });
+      store.setState({ roles: patch });
     }
-    seenNames.add(r.roleName);
-    roles[r.roleName] = { filename: r.filename, content: r.content, id: r.roleName };
-    loaded++;
+  }
+
+  requestAnimationFrame(() => {
+    renderScreen('screen-routing');
   });
-
-  store.setState({ roles });
-
-  if (loaded > 0) {
-    const names = Object.keys(roles).join(', ');
-    updateRolesStatus('success', `${loaded} ролей загружено`, escapeHtml(names));
-    showToast(`${loaded} ролей загружено`, TOAST_TYPES.SUCCESS);
-    requestAnimationFrame(() => goToScreen('screen-input'));
-  } else {
-    updateRolesStatus('error', 'Ошибка загрузки', 'Проверьте путь. Для локального теста запустите: python3 -m http.server 8000');
-    showToast('Роли не загружены — проверьте путь', TOAST_TYPES.ERROR);
-  }
 }
 
-async function loadRolesFromFile(input) {
-  const file = input.files[0];
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const manifest = JSON.parse(text);
-    if (!manifest || !Array.isArray(manifest.roles)) throw new Error('Неверная структура манифеста');
-    store.setState({ manifest });
-    const roleFiles = manifest.roles.map(x => x.file).filter(f => typeof f === 'string');
-    updateRolesStatus('success', `Манифест: ${roleFiles.length} ролей`, '');
-    showToast('Манифест загружен. Выберите .md файлы ролей.', TOAST_TYPES.SUCCESS);
-    promptForMdFiles(roleFiles);
-  } catch (e) {
-    showToast('Ошибка roles.json: ' + e.message, TOAST_TYPES.ERROR);
-  }
-  input.value = '';
-}
-
-function promptForMdFiles(expectedFiles) {
+function promptForMdFiles() {
   const input = document.createElement('input');
   input.type = 'file';
-  input.multiple = true;
   input.accept = '.md';
-  input.onchange = (e) => {
-    loadMdFiles(e.target.files, expectedFiles);
+  input.multiple = true;
+  input.onchange = async (e) => {
     input.remove();
+    const files = Array.from(e.target.files).filter(f => {
+      if (f.size > MAX_FILE_SIZE) {
+        console.warn(`File too large: ${f.name} (${f.size} bytes)`);
+        return false;
+      }
+      return true;
+    });
+    await loadMdFiles(files);
   };
   input.click();
 }
 
-async function loadMdFiles(files, expectedFiles) {
-  const fileMap = new Map();
-  for (const file of files) {
-    if (!fileMap.has(file.name)) fileMap.set(file.name, file);
-  }
-
-  const roles = {};
-  let loaded = 0;
-  const seenNames = new Set();
-  const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB per file
-
-  for (const fileName of expectedFiles) {
-    const file = fileMap.get(fileName);
-    if (!file) continue;
-    if (file.size > MAX_FILE_SIZE) {
-      console.warn('File too large, skipping:', fileName, file.size);
-      continue;
-    }
-    try {
-      const content = await file.text();
-      const m = fileName.match(/ROLE-\d+-(.+)\.md$/);
-      const roleName = m ? m[1] : fileName.replace(/\.md$/, '');
-      if (seenNames.has(roleName)) {
-        console.warn('Duplicate role name, skipping:', roleName);
-        continue;
+async function loadMdFiles(files) {
+  const seen = new Set();
+  const texts = await Promise.all(
+    files.map(async (file) => {
+      const roleName = file.name.replace(/\.md$/i, '');
+      if (seen.has(roleName)) {
+        console.warn(`Duplicate role skipped: ${roleName}`);
+        return null;
       }
-      seenNames.add(roleName);
-      roles[roleName] = { filename: fileName, content, id: roleName };
-      loaded++;
-    } catch (e) { console.error('Failed to read', fileName, e); }
+      seen.add(roleName);
+      try {
+        const text = await file.text();
+        return { roleName, text };
+      } catch (e) {
+        console.warn(`Failed to read ${file.name}:`, e.message);
+        return null;
+      }
+    })
+  );
+
+  const valid = texts.filter(Boolean);
+  if (valid.length) {
+    const patch = {};
+    valid.forEach(({ roleName, text }) => {
+      patch[roleName] = text;
+    });
+    store.setState({ roles: patch });
   }
 
-  store.setState({ roles });
-
-  if (loaded > 0) {
-    const names = Object.keys(roles).join(', ');
-    updateRolesStatus('success', `${loaded} ролей загружено`, escapeHtml(names));
-    showToast(`${loaded} ролей загружено`, TOAST_TYPES.SUCCESS);
-    requestAnimationFrame(() => goToScreen('screen-input'));
-  } else {
-    updateRolesStatus('error', 'Ошибка загрузки', 'Не найдены .md файлы из манифеста. Проверьте имена файлов.');
-    showToast('Роли не загружены', TOAST_TYPES.ERROR);
-  }
+  requestAnimationFrame(() => {
+    renderScreen('screen-routing');
+  });
 }
 
-function updateRolesStatus(type, title, detail) {
-  const el = document.getElementById('roles-status');
-  if (!el) return;
-  const icons = { success: '✅', warning: '⚠️', error: '❌', info: '⏳' };
-  el.className = `v-alert v-alert--${type} v-mt-md`;
-  el.innerHTML = `<span class="v-alert__icon">${icons[type] || 'ℹ️'}</span><div class="v-alert__content"><strong>${escapeHtml(title)}</strong>${detail ? `<br><span style="font-size:.75rem;color:var(--v-text-muted)">${escapeHtml(detail)}</span>` : ''}</div>`;
+function exportSession() {
+  const blob = new Blob([store.exportState()], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `voyage-session-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+
+  requestAnimationFrame(() => {
+    if (a.parentNode) a.parentNode.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
 }
 
-// ===== IMPORT/EXPORT SESSION =====
+async function importSession(file) {
+  const reader = new FileReader();
+  return new Promise((resolve, reject) => {
+    reader.onload = (e) => {
+      try {
+        const json = e.target.result;
+        const ok = store.importState(json);
+        if (ok) {
+          renderScreen(store.getState().activeScreen);
+          showToast('Сессия загружена', 'success');
+          resolve(true);
+        } else {
+          showToast('Невалидный файл сессии', 'error');
+          resolve(false);
+        }
+      } catch (err) {
+        showToast('Ошибка импорта: ' + err.message, 'error');
+        reject(err);
+      }
+    };
+    reader.onerror = () => {
+      showToast('Ошибка чтения файла', 'error');
+      reject(new Error('File read error'));
+    };
+    reader.readAsText(file);
+  });
+}
 
 function exportSession() {
   const payload = store.exportState();
