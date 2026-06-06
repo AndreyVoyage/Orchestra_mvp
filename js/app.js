@@ -314,7 +314,13 @@ const EOCD_OFFS = {
   CD_SIZE: 12, CD_OFFSET: 16, COMMENT_LEN: 20, FIXED: 22
 };
 
+const ZIP_MAX_FILES = 1000;
+const ZIP_MAX_EXTRACT_SIZE = 50 * 1024 * 1024; // 50 MB
+
 function getData(buffer, offset, size) {
+  if (offset < 0 || offset + size > buffer.byteLength) {
+    throw new RangeError(`ZIP bounds error: offset=${offset}, size=${size}, length=${buffer.byteLength}`);
+  }
   return buffer.slice(offset, offset + size);
 }
 
@@ -323,13 +329,19 @@ function readString(buffer, offset, len) {
 }
 
 async function decompressDeflateRaw(data) {
-  const ds = new DecompressionStream('deflate-raw');
-  const stream = new Blob([data]).stream().pipeThrough(ds);
-  return new Response(stream).arrayBuffer();
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('DecompressionStream не поддерживается в этом браузере');
+  }
+  try {
+    const ds = new DecompressionStream('deflate-raw');
+    const stream = new Blob([data]).stream().pipeThrough(ds);
+    return await new Response(stream).arrayBuffer();
+  } catch (e) {
+    throw new Error('ZIP decompression failed: ' + e.message);
+  }
 }
 
 function findEOCD(buffer) {
-  // Search backwards from end for EOCD signature
   const view = new DataView(buffer);
   const maxComment = 65535;
   const start = Math.max(0, buffer.byteLength - EOCD_OFFS.FIXED - maxComment);
@@ -349,23 +361,33 @@ function findEOCD(buffer) {
 }
 
 function readCentralDirectory(buffer, eocd) {
+  if (eocd.cdOffset >= buffer.byteLength) {
+    throw new Error('ZIP: Invalid Central Directory offset');
+  }
   const files = [];
   const view = new DataView(buffer);
   let offset = eocd.cdOffset;
   for (let i = 0; i < eocd.cdRecords; i++) {
+    if (offset + CDFH_OFFS.FIXED > buffer.byteLength) {
+      throw new Error('ZIP: Central Directory exceeds buffer bounds at offset ' + offset);
+    }
     if (view.getUint32(offset, true) !== CDFH_SIG) {
       throw new Error('ZIP: Invalid Central Directory File Header at offset ' + offset);
     }
     const nameLen = view.getUint16(offset + CDFH_OFFS.NAME_LEN, true);
     const extraLen = view.getUint16(offset + CDFH_OFFS.EXTRA_LEN, true);
     const commentLen = view.getUint16(offset + CDFH_OFFS.COMMENT_LEN, true);
+    const totalLen = CDFH_OFFS.FIXED + nameLen + extraLen + commentLen;
+    if (offset + totalLen > buffer.byteLength) {
+      throw new Error('ZIP: Central Directory entry exceeds buffer bounds');
+    }
     const name = readString(buffer, offset + CDFH_OFFS.FIXED, nameLen);
     const compMethod = view.getUint16(offset + CDFH_OFFS.COMP_METHOD, true);
     const compSize = view.getUint32(offset + CDFH_OFFS.COMP_SIZE, true);
     const uncompSize = view.getUint32(offset + CDFH_OFFS.UNCOMP_SIZE, true);
     const fhOffset = view.getUint32(offset + CDFH_OFFS.FH_OFFSET, true);
     files.push({ name, compMethod, compSize, uncompSize, fhOffset });
-    offset += CDFH_OFFS.FIXED + nameLen + extraLen + commentLen;
+    offset += totalLen;
   }
   return files;
 }
@@ -373,12 +395,19 @@ function readCentralDirectory(buffer, eocd) {
 async function extractFile(buffer, fileInfo) {
   const view = new DataView(buffer);
   const fhOffset = fileInfo.fhOffset;
+  if (fhOffset + FH_OFFS.FIXED > buffer.byteLength) {
+    throw new Error('ZIP: File header out of bounds for ' + fileInfo.name);
+  }
   if (view.getUint32(fhOffset, true) !== FH_SIG) {
     throw new Error('ZIP: Invalid File Header for ' + fileInfo.name);
   }
   const nameLen = view.getUint16(fhOffset + FH_OFFS.NAME_LEN, true);
   const extraLen = view.getUint16(fhOffset + FH_OFFS.EXTRA_LEN, true);
   const dataOffset = fhOffset + FH_OFFS.FIXED + nameLen + extraLen;
+  const endOffset = dataOffset + fileInfo.compSize;
+  if (endOffset > buffer.byteLength) {
+    throw new Error('ZIP: Compressed data exceeds buffer for ' + fileInfo.name);
+  }
   const compData = getData(buffer, dataOffset, fileInfo.compSize);
 
   if (fileInfo.compMethod === COMP_NONE) {
@@ -398,14 +427,21 @@ async function extractFile(buffer, fileInfo) {
 async function parseZip(buffer) {
   const eocd = findEOCD(buffer);
   const files = readCentralDirectory(buffer, eocd);
+  if (files.length > ZIP_MAX_FILES) {
+    throw new Error(`ZIP: Too many files (${files.length} > ${ZIP_MAX_FILES})`);
+  }
   const result = [];
+  let extractedSize = 0;
   for (const info of files) {
-    // Skip directories and hidden files
     if (info.name.endsWith('/')) continue;
     if (info.name.startsWith('__MACOSX/')) continue;
     if (info.name.startsWith('.')) continue;
     try {
       const raw = await extractFile(buffer, info);
+      extractedSize += raw.byteLength;
+      if (extractedSize > ZIP_MAX_EXTRACT_SIZE) {
+        throw new Error(`ZIP: Total extracted size exceeds ${ZIP_MAX_EXTRACT_SIZE} bytes`);
+      }
       const content = new TextDecoder('utf-8').decode(raw);
       const language = detectLanguage(info.name, content);
       result.push({ name: info.name, content, language });
@@ -431,14 +467,12 @@ function detectLanguage(filename, content) {
   };
   if (map[ext]) return map[ext];
   // Heuristics
-  if (content.includes('import ') && content.includes('from ')) return 'javascript';
-  if (content.includes('def ') && content.includes(':')) return 'python';
-  if (content.includes('package main')) return 'go';
-  if (content.includes('<?php')) return 'php';
+  if (/^\s*import\s+.+\s+from\s+['"]/.test(content)) return 'javascript';
+  if (/^\s*def\s+\w+\s*\(/.test(content)) return 'python';
+  if (/^\s*package\s+main\b/.test(content)) return 'go';
+  if (/^\s*<\?php/.test(content)) return 'php';
   return 'text';
 }
-
-
 // ===== DEPENDENCY ANALYZER =====
 // ============================================
 // VOYAGE DEPENDENCY ANALYZER — Multi-language
@@ -474,7 +508,7 @@ const LANGUAGE_PATTERNS = {
     ],
     functions: /def\s+(\w+)\s*\(/g,
     classes: /class\s+(\w+)\s*(?:\(|:)/g,
-    exports: null // Python doesn't have explicit exports
+    exports: null
   },
   go: {
     imports: [
@@ -482,8 +516,8 @@ const LANGUAGE_PATTERNS = {
       /import\s+['"]([^'"]+)['"]/g
     ],
     functions: /func\s+(?:\([^)]*\)\s*)?(\w+)\s*\(/g,
-    classes: null, // Go uses structs
-    exports: /func\s+(\w+)[^(]*\(/g // exported if capitalized
+    classes: null,
+    exports: /func\s+(\w+)[^(]*\(/g
   },
   java: {
     imports: [
@@ -500,7 +534,7 @@ const LANGUAGE_PATTERNS = {
       /\burl\s*\(\s*['"]([^'"]+)['"]\s*\)/gi,
       /\b(?:src|href)\s*=\s*['"]([^'"]+\.(?:js|css|png|jpg|svg|woff|woff2))['"]/gi
     ],
-    functions: /<script[^>]*>([\s\S]*?)<\/script>/gi, // extract inline scripts
+    functions: /<script[^>]*>([\s\S]*?)<\/script>/gi,
     classes: null,
     exports: null
   },
@@ -541,13 +575,9 @@ const LANGUAGE_PATTERNS = {
 
 function cleanPath(path, currentFile) {
   if (!path) return null;
-  // Remove query params and hash
   path = path.split('?')[0].split('#')[0];
-  // Skip URLs
   if (/^https?:\/\//.test(path)) return null;
-  // Clean relative paths
   path = path.replace(/^\.\//, '').replace(/^\//, '');
-  // Remove extensions for module resolution
   const ext = path.split('.').pop();
   if (['js', 'ts', 'jsx', 'tsx', 'py', 'go', 'java'].includes(ext)) {
     return path.replace(/\.[^.]+$/, '');
@@ -559,12 +589,20 @@ function extractImports(content, patterns) {
   if (!patterns || !patterns.imports) return [];
   const deps = new Set();
   for (const regex of patterns.imports) {
+    if (!regex.global) {
+      console.warn('Regex without global flag in extractImports:', regex);
+      const match = regex.exec(content);
+      if (match) {
+        const dep = match[1] || match[2];
+        if (dep) deps.add(cleanPath(dep));
+      }
+      continue;
+    }
     regex.lastIndex = 0;
     let match;
     while ((match = regex.exec(content)) !== null) {
       const dep = match[1] || match[2];
       if (dep) {
-        // For Go multi-line imports
         if (dep.includes('\n')) {
           dep.split('\n').forEach(line => {
             const m = line.match(/['"]([^'"]+)['"]/);
@@ -584,24 +622,42 @@ function extractSymbols(content, patterns) {
   if (!patterns) return symbols;
 
   if (patterns.functions) {
-    patterns.functions.lastIndex = 0;
-    let m;
-    while ((m = patterns.functions.exec(content)) !== null) {
-      symbols.functions.push(m[1] || m[2]);
+    if (!patterns.functions.global) {
+      console.warn('Regex without global flag in functions:', patterns.functions);
+      const m = patterns.functions.exec(content);
+      if (m) symbols.functions.push(m[1] || m[2]);
+    } else {
+      patterns.functions.lastIndex = 0;
+      let m;
+      while ((m = patterns.functions.exec(content)) !== null) {
+        symbols.functions.push(m[1] || m[2]);
+      }
     }
   }
   if (patterns.classes) {
-    patterns.classes.lastIndex = 0;
-    let m;
-    while ((m = patterns.classes.exec(content)) !== null) {
-      symbols.classes.push(m[1]);
+    if (!patterns.classes.global) {
+      console.warn('Regex without global flag in classes:', patterns.classes);
+      const m = patterns.classes.exec(content);
+      if (m) symbols.classes.push(m[1]);
+    } else {
+      patterns.classes.lastIndex = 0;
+      let m;
+      while ((m = patterns.classes.exec(content)) !== null) {
+        symbols.classes.push(m[1]);
+      }
     }
   }
   if (patterns.exports) {
-    patterns.exports.lastIndex = 0;
-    let m;
-    while ((m = patterns.exports.exec(content)) !== null) {
-      symbols.exports.push(m[1] || 'default');
+    if (!patterns.exports.global) {
+      console.warn('Regex without global flag in exports:', patterns.exports);
+      const m = patterns.exports.exec(content);
+      if (m) symbols.exports.push(m[1] || 'default');
+    } else {
+      patterns.exports.lastIndex = 0;
+      let m;
+      while ((m = patterns.exports.exec(content)) !== null) {
+        symbols.exports.push(m[1] || 'default');
+      }
     }
   }
   return symbols;
@@ -617,9 +673,11 @@ function analyzeProject(files) {
   const symbols = {};
   const fileMap = new Map();
 
-  // Index all files
   files.forEach(f => {
     const cleanName = f.name.replace(/\.[^.]+$/, '');
+    if (fileMap.has(cleanName)) {
+      console.warn('File name collision (clean):', cleanName, f.name);
+    }
     fileMap.set(cleanName, f);
     fileMap.set(f.name, f);
     const patterns = LANGUAGE_PATTERNS[f.language] || LANGUAGE_PATTERNS.javascript;
@@ -629,22 +687,20 @@ function analyzeProject(files) {
       dependents: [],
       language: f.language,
       symbols: symbols[f.name],
-      size: f.content.length
+      size: f.content.length,
+      _content: f.content
     };
   });
 
-  // Build forward dependencies
   files.forEach(f => {
     const patterns = LANGUAGE_PATTERNS[f.language] || LANGUAGE_PATTERNS.javascript;
     const imports = extractImports(f.content, patterns);
     graph[f.name].dependencies = imports.map(dep => {
-      // Try to resolve dependency to actual file
       const resolved = resolveDependency(dep, f.name, fileMap);
       return { raw: dep, resolved };
     });
   });
 
-  // Build reverse dependencies (dependents)
   Object.entries(graph).forEach(([fileName, info]) => {
     info.dependencies.forEach(dep => {
       if (dep.resolved && graph[dep.resolved]) {
@@ -664,20 +720,16 @@ function analyzeProject(files) {
 }
 
 function resolveDependency(dep, currentFile, fileMap) {
-  // Direct match
   if (fileMap.has(dep)) return fileMap.get(dep).name;
-  // With extension guessing
   for (const ext of ['.js', '.ts', '.jsx', '.tsx', '.py', '.go', '.java']) {
     if (fileMap.has(dep + ext)) return fileMap.get(dep + ext).name;
   }
-  // Relative path resolution
   const currentDir = currentFile.split('/').slice(0, -1).join('/');
   const relativePath = currentDir ? currentDir + '/' + dep : dep;
   if (fileMap.has(relativePath)) return fileMap.get(relativePath).name;
   for (const ext of ['.js', '.ts', '.jsx', '.tsx', '.py', '.go', '.java']) {
     if (fileMap.has(relativePath + ext)) return fileMap.get(relativePath + ext).name;
   }
-  // Index file resolution (folder/index.js)
   for (const ext of ['.js', '.ts', '.jsx', '.tsx']) {
     if (fileMap.has(dep + '/index' + ext)) return fileMap.get(dep + '/index' + ext).name;
   }
@@ -689,11 +741,10 @@ function resolveDependency(dep, currentFile, fileMap) {
  */
 function findCycles(graph) {
   const cycles = [];
-  const visited = new Set();
   const recStack = new Set();
   const path = [];
 
-  function dfs(node) {
+  function dfs(node, visited) {
     visited.add(node);
     recStack.add(node);
     path.push(node);
@@ -704,12 +755,10 @@ function findCycles(graph) {
 
     for (const dep of deps) {
       if (!visited.has(dep)) {
-        dfs(dep);
+        dfs(dep, visited);
       } else if (recStack.has(dep)) {
-        // Found cycle
         const cycleStart = path.indexOf(dep);
         const cycle = path.slice(cycleStart).concat([dep]);
-        // Normalize: start from smallest element to deduplicate
         const normalized = normalizeCycle(cycle);
         if (!cycles.some(c => cyclesEqual(c, normalized))) {
           cycles.push(normalized);
@@ -722,14 +771,14 @@ function findCycles(graph) {
   }
 
   Object.keys(graph).forEach(node => {
-    if (!visited.has(node)) dfs(node);
+    const visited = new Set();
+    dfs(node, visited);
   });
 
   return cycles;
 }
 
 function normalizeCycle(cycle) {
-  // Rotate to start from lexicographically smallest
   let minIdx = 0;
   for (let i = 1; i < cycle.length - 1; i++) {
     if (cycle[i] < cycle[minIdx]) minIdx = i;
@@ -774,13 +823,17 @@ function findDeadCode(graph, symbols) {
     const used = new Set();
     Object.entries(graph).forEach(([otherFile, otherInfo]) => {
       if (otherFile === file) return;
-      // Check if any dependency points to this file
       const deps = otherInfo.dependencies || [];
       if (deps.some(d => d.resolved === file)) {
-        // Rough check: see if imported names match exports
-        const otherContent = (deps.find(d => d.resolved === file)?.raw) || '';
+        const otherContent = otherInfo._content || '';
         info.symbols.exports.forEach(exp => {
-          if (otherContent.includes(exp) || otherFile.includes(exp)) {
+          if (exp === 'default') {
+            used.add('default');
+            return;
+          }
+          const namedImportRe = new RegExp('import\\s+\\{[^}]*\\b' + escapeRegExp(exp) + '\\b[^}]*\\}');
+          const nsImportRe = new RegExp('import\\s+\\*\\s+as\\s+\\w+.*?from\\s+["\'][^"\']*' + escapeRegExp(file.replace(/\.[^.]+$/, '')) + '[^"\']*["\']');
+          if (namedImportRe.test(otherContent) || nsImportRe.test(otherContent) || otherContent.includes(exp)) {
             used.add(exp);
           }
         });
@@ -807,12 +860,14 @@ function computeStats(graph, files) {
   const unresolved = Object.values(graph).reduce(
     (sum, i) => sum + i.dependencies.filter(d => !d.resolved).length, 0
   );
+  const totalSize = files.reduce((s, f) => s + f.content.length, 0);
   return {
     totalFiles: files.length,
     totalDependencies: totalDeps,
     unresolvedDependencies: unresolved,
     languages: langs,
-    avgFileSize: Math.round(files.reduce((s, f) => s + f.content.length, 0) / files.length)
+    avgFileSize: files.length ? Math.round(totalSize / files.length) : 0,
+    totalSize
   };
 }
 
@@ -823,15 +878,14 @@ function formatReport(analysis) {
   const { graph, cycles, impact, deadCode, orphans, stats } = analysis;
   let report = '# 📊 Dependency Analysis Report\n\n';
 
-  // Stats
   report += '## 📈 Statistics\n\n';
   report += `- **Total files:** ${stats.totalFiles}\n`;
   report += `- **Total dependencies:** ${stats.totalDependencies}\n`;
   report += `- **Unresolved:** ${stats.unresolvedDependencies}\n`;
   report += `- **Languages:** ${Object.entries(stats.languages).map(([k,v]) => `${k}(${v})`).join(', ')}\n`;
-  report += `- **Avg file size:** ${stats.avgFileSize} chars\n\n`;
+  report += `- **Avg file size:** ${stats.avgFileSize} chars\n`;
+  report += `- **Total size:** ${stats.totalSize} chars\n\n`;
 
-  // Cycles
   report += '## 🔄 Cycles\n\n';
   if (cycles.length) {
     cycles.forEach(c => {
@@ -842,7 +896,6 @@ function formatReport(analysis) {
   }
   report += '\n';
 
-  // Impact Analysis
   report += '## 💥 Impact Analysis\n\n';
   report += '> "If you change X, these files may break:"\n\n';
   Object.entries(impact).forEach(([file, deps]) => {
@@ -852,7 +905,6 @@ function formatReport(analysis) {
   });
   report += '\n';
 
-  // Dead Code
   report += '## 💀 Dead Code\n\n';
   if (Object.keys(deadCode).length) {
     Object.entries(deadCode).forEach(([file, exports]) => {
@@ -863,14 +915,12 @@ function formatReport(analysis) {
   }
   report += '\n';
 
-  // Orphans
   if (orphans.length) {
     report += '## 🏝️ Orphaned Files\n\n';
     orphans.forEach(f => report += `- ${f}\n`);
     report += '\n';
   }
 
-  // Full Graph
   report += '## 🕸️ Full Dependency Graph\n\n';
   report += '```\n';
   Object.entries(graph).forEach(([file, info]) => {
@@ -881,264 +931,6 @@ function formatReport(analysis) {
 
   return report;
 }
-
-
-// ===== IMPORTER =====
-// ============================================
-// VOYAGE IMPORTER — Role loading (fetch + File API fallback)
-// Handles CORS, file:// protocol, manual file selection
-// ============================================
-
-const TOAST_TYPES = { ERROR: 'error', SUCCESS: 'success', WARN: 'warn', INFO: 'info' };
-
-let _rolesAbortController = null;
-// ===== IMPORTER v3.2 =====
-// Role loading with concurrency limit, abort control, memory safety
-// ============================================
-
-const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB
-const CONCURRENCY_LIMIT = 5;
-
-let _rolesLoading = false;
-let _rolesAbortController = null;
-
-function normalizeBaseUrl(url) {
-  if (typeof url !== 'string') return './prompts/';
-  return url.replace(/\/+$/, '') + '/';
-}
-
-async function fetchRoleFile(url, signal) {
-  const to = setTimeout(() => signal.abort(), 10000);
-  try {
-    const res = await fetch(url, { signal });
-    clearTimeout(to);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  } catch (e) {
-    clearTimeout(to);
-    throw e;
-  }
-}
-
-async function loadRoles(baseUrl = store.getState().baseUrl) {
-  if (_rolesLoading) {
-    showToast('Загрузка уже идёт...', 'warning');
-    return;
-  }
-  _rolesLoading = true;
-  if (_rolesAbortController) _rolesAbortController.abort();
-  _rolesAbortController = new AbortController();
-
-  const normalized = normalizeBaseUrl(baseUrl);
-  store.setState({ baseUrl: normalized, lastAction: 'loadRoles' });
-
-  try {
-    const manifestUrl = normalized + 'roles.json';
-    const manifestRes = await fetchRoleFile(manifestUrl, _rolesAbortController.signal);
-    const manifest = JSON.parse(manifestRes);
-    const files = manifest.files || manifest;
-    await loadRoleFiles(files, normalized);
-  } catch (e) {
-    console.warn('Manifest failed, using fallback:', e.message);
-    const fallback = ['security.md', 'frontend.md', 'backend.md', 'devops.md'];
-    await loadRoleFiles(fallback, normalized);
-  } finally {
-    _rolesLoading = false;
-    _rolesAbortController = null;
-  }
-}
-
-async function loadRoleFiles(files, baseUrl) {
-  const seen = new Set();
-  const chunks = [];
-  for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
-    chunks.push(files.slice(i, i + CONCURRENCY_LIMIT));
-  }
-
-  for (const chunk of chunks) {
-    const results = await Promise.all(
-      chunk.map(async (file) => {
-        const roleName = file.replace(/\.md$/i, '').replace(/^ROLE-\d+-/i, '');
-        if (seen.has(roleName)) {
-          console.warn(`Duplicate role skipped: ${roleName}`);
-          return null;
-        }
-        seen.add(roleName);
-
-        try {
-          const text = await fetchRoleFile(baseUrl + file, _rolesAbortController.signal);
-          return { roleName, text };
-        } catch (e) {
-          console.warn(`Failed to load ${file}:`, e.message);
-          return null;
-        }
-      })
-    );
-
-    const valid = results.filter(Boolean);
-    if (valid.length) {
-      const patch = {};
-      valid.forEach(({ roleName, text }) => {
-        patch[roleName] = text;
-      });
-      store.setState({ roles: patch });
-    }
-  }
-
-  requestAnimationFrame(() => {
-    renderScreen('screen-routing');
-  });
-}
-
-function promptForMdFiles() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.md';
-  input.multiple = true;
-  input.onchange = async (e) => {
-    input.remove();
-    const files = Array.from(e.target.files).filter(f => {
-      if (f.size > MAX_FILE_SIZE) {
-        console.warn(`File too large: ${f.name} (${f.size} bytes)`);
-        return false;
-      }
-      return true;
-    });
-    await loadMdFiles(files);
-  };
-  input.click();
-}
-
-async function loadMdFiles(files) {
-  const seen = new Set();
-  const texts = await Promise.all(
-    files.map(async (file) => {
-      const roleName = file.name.replace(/\.md$/i, '');
-      if (seen.has(roleName)) {
-        console.warn(`Duplicate role skipped: ${roleName}`);
-        return null;
-      }
-      seen.add(roleName);
-      try {
-        const text = await file.text();
-        return { roleName, text };
-      } catch (e) {
-        console.warn(`Failed to read ${file.name}:`, e.message);
-        return null;
-      }
-    })
-  );
-
-  const valid = texts.filter(Boolean);
-  if (valid.length) {
-    const patch = {};
-    valid.forEach(({ roleName, text }) => {
-      patch[roleName] = text;
-    });
-    store.setState({ roles: patch });
-  }
-
-  requestAnimationFrame(() => {
-    renderScreen('screen-routing');
-  });
-}
-
-function exportSession() {
-  const blob = new Blob([store.exportState()], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `voyage-session-${Date.now()}.json`;
-  document.body.appendChild(a);
-  a.click();
-
-  requestAnimationFrame(() => {
-    if (a.parentNode) a.parentNode.removeChild(a);
-    URL.revokeObjectURL(url);
-  });
-}
-
-async function importSession(file) {
-  const reader = new FileReader();
-  return new Promise((resolve, reject) => {
-    reader.onload = (e) => {
-      try {
-        const json = e.target.result;
-        const ok = store.importState(json);
-        if (ok) {
-          renderScreen(store.getState().activeScreen);
-          showToast('Сессия загружена', 'success');
-          resolve(true);
-        } else {
-          showToast('Невалидный файл сессии', 'error');
-          resolve(false);
-        }
-      } catch (err) {
-        showToast('Ошибка импорта: ' + err.message, 'error');
-        reject(err);
-      }
-    };
-    reader.onerror = () => {
-      showToast('Ошибка чтения файла', 'error');
-      reject(new Error('File read error'));
-    };
-    reader.readAsText(file);
-  });
-}
-
-function exportSession() {
-  const payload = store.exportState();
-  const blob = new Blob([payload], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `voyage_session_${new Date().toISOString().slice(0, 10)}.json`;
-  a.style.display = 'none';
-
-  const cleanup = () => {
-    if (a.parentNode) a.parentNode.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  document.body.appendChild(a);
-  a.click();
-  requestAnimationFrame(cleanup);
-  showToast('Сессия экспортирована', TOAST_TYPES.SUCCESS);
-}
-
-function importSession(input) {
-  const file = input.files[0];
-  if (!file) return;
-  if (file.size > 5 * 1024 * 1024) {
-    showToast('Файл > 5 МБ', TOAST_TYPES.ERROR);
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const ok = store.importState(e.target.result);
-    if (ok) {
-      showToast('Сессия импортирована!', TOAST_TYPES.SUCCESS);
-      const state = store.getState();
-      renderScreen(state.activeScreen);
-    } else {
-      showToast('Некорректный файл', TOAST_TYPES.ERROR);
-    }
-  };
-  reader.onerror = () => showToast('Ошибка чтения файла', TOAST_TYPES.ERROR);
-  reader.readAsText(file);
-  input.value = '';
-}
-}
-
-function resetSession() {
-  if (!document.hasFocus()) return;
-  if (confirm('Очистить ВСЕ данные? Это необратимо.')) {
-    store.reset();
-    location.reload();
-  }
-}
-
-
 // ===== UI =====
 // ============================================
 // VOYAGE UI — XSS-safe DOM rendering, no innerHTML for user data
