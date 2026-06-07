@@ -1,177 +1,150 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self';">
-<title>Voyage Orchestrator v3</title>
-<link rel="stylesheet" href="./css/main.css">
-<base target="_blank">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voyage Orchestrator v3</title>
+  <link rel="stylesheet" href="css/main.css">
 </head>
-<body class="voyage">
-
-<!-- Header -->
-<header class="v-header">
-  <div class="v-container v-header__inner">
-    <div class="v-header__brand">
-      <span class="v-header__logo">🧭</span>
-      <div>
-        <h1 class="v-header__title">Voyage Orchestrator</h1>
-        <p class="v-header__subtitle">v3.0 · Модульная архитектура · ZIP · Impact Analysis</p>
-      </div>
-    </div>
-    <div class="v-header__actions">
-      <button onclick="app.exportSession()" class="v-header__btn" title="Экспорт">💾</button>
-      <label class="v-header__btn" title="Импорт">📂<input type="file" class="v-file-input" accept=".json" onchange="app.importSession(this)"></label>
-      <button onclick="app.resetSession()" class="v-header__btn v-header__btn--danger" title="Сброс">🗑</button>
-    </div>
-  </div>
-</header>
-
-<!-- Progress -->
-<div class="v-progress">
-  <div class="v-container v-progress__inner">
-    <div id="step-settings" class="v-step v-step--active"><span class="v-step__icon">⚙️</span>Настройки</div>
-    <div id="step-project" class="v-step v-step--pending"><span class="v-step__icon">📦</span>Проект</div>
-    <div id="step-input" class="v-step v-step--pending"><span class="v-step__icon">📝</span>Ввод</div>
-    <div id="step-routing" class="v-step v-step--pending"><span class="v-step__icon">🎯</span>Роли</div>
-    <div id="step-collector" class="v-step v-step--pending"><span class="v-step__icon">📥</span>Сбор</div>
-    <div id="step-final" class="v-step v-step--pending"><span class="v-step__icon">🏁</span>Финал</div>
-  </div>
-</div>
-
-<!-- Main -->
-<main class="v-main">
-  <div class="v-container">
-
-    <!-- 1. SETTINGS -->
-    <section id="screen-settings" class="v-section v-section--active">
-      <div class="v-card">
-        <div class="v-card__header"><h2 class="v-card__title">⚙️ Настройки</h2></div>
-        <div class="v-card__body">
-          <div class="v-form__group">
-            <label class="v-form__label">Путь к ролям</label>
-            <input type="text" id="baseUrl" class="v-input" value="./prompts/" placeholder="./prompts/">
-            <p class="v-form__hint">💡 Для GitHub Pages: <code>./prompts/</code></p>
-          </div>
-          <div class="v-flex v-flex--gap-sm">
-            <button onclick="app.loadRoles()" class="v-btn v-btn--primary v-btn--block">🔄 Загрузить роли (с сервера)</button>
-          </div>
-          <div class="v-form__group v-mt-md">
-            <label class="v-form__label">Или загрузить локально</label>
-            <input type="file" id="localRolesFile" class="v-file-input" accept=".json" onchange="app.loadRolesFromFile(this)">
-            <button onclick="document.getElementById('localRolesFile').click()" class="v-btn v-btn--secondary v-btn--block">📂 Выбрать roles.json</button>
-            <p class="v-form__hint">💡 Если index.html открыт как файл (file://), используйте эту кнопку. Сначала выберите <code>roles.json</code>, затем — <code>.md</code> файлы ролей.</p>
-          </div>
-          <div id="roles-status" class="v-alert v-alert--info v-mt-md">
-            <span class="v-alert__icon">ℹ️</span>
-            <div class="v-alert__content">Роли не загружены. Нажми «Загрузить роли».</div>
+<body>
+  <div id="app" class="voyage">
+    <header class="v-header">
+      <div class="v-container v-header__inner">
+        <div class="v-header__brand">
+          <span class="v-header__logo">🧭</span>
+          <div>
+            <div class="v-header__title">Voyage Orchestrator</div>
+            <div class="v-header__subtitle">v3.0 · Модульная архитектура · ZIP · Impact Analysis</div>
           </div>
         </div>
-      </div>
-    </section>
-
-    <!-- 2. PROJECT (ZIP + Analysis) -->
-    <section id="screen-project" class="v-section">
-      <div class="v-card">
-        <div class="v-card__header"><h2 class="v-card__title">📦 Загрузка проекта</h2></div>
-        <div class="v-card__body">
-          <div class="v-alert v-alert--info v-mb-md">
-            <span class="v-alert__icon">📋</span>
-            <div class="v-alert__content"><div class="v-alert__title">Загрузите ZIP-архив проекта</div>Система проанализирует зависимости между файлами, найдёт циклы, мёртвый код и построит карту влияния изменений.</div>
-          </div>
-          <div id="project-content"></div>
+        <div class="v-header__actions">
+          <button id="btn-export" class="v-header__btn" title="Экспорт сессии">💾</button>
+          <button id="btn-import" class="v-header__btn" title="Импорт сессии">📁</button>
+          <button id="btn-reset" class="v-header__btn v-header__btn--danger" title="Сбросить">🗑️</button>
         </div>
       </div>
-    </section>
+    </header>
 
-    <!-- 3. INPUT -->
-    <section id="screen-input" class="v-section">
-      <div class="v-card">
-        <div class="v-card__header"><h2 class="v-card__title">📝 Входные данные</h2></div>
-        <div class="v-card__body">
-          <div class="v-form__group">
-            <label class="v-form__label">Задача / Контекст</label>
-            <textarea id="taskInput" rows="3" class="v-textarea" placeholder="Опиши задачу..."></textarea>
+    <nav class="v-progress">
+      <div class="v-container v-progress__inner" id="progress-bar"></div>
+    </nav>
+
+    <main class="v-main v-container">
+      <section id="screen-settings" class="v-section v-section--active">
+        <div class="v-card">
+          <h2 class="v-card__title">⚙️ Настройки</h2>
+          <div class="v-card__body">
+            <div class="v-form__group">
+              <label class="v-form__label">Путь к ролям</label>
+              <input type="text" id="baseUrl" class="v-input" value="./prompts/">
+              <p class="v-form__hint">💡 Для GitHub Pages: <code>./prompts/</code></p>
+            </div>
+            <button id="btn-load-roles" class="v-btn v-btn--primary v-btn--block">🔄 Загрузить роли (с сервера)</button>
+            <div class="v-mt-md">
+              <p class="v-form__label">Или загрузить локально</p>
+              <button id="btn-pick-manifest" class="v-btn v-btn--secondary v-btn--block">📂 Выбрать roles.json</button>
+              <p class="v-form__hint">💡 Если index.html открыт как файл (file://), используйте эту кнопку.</p>
+            </div>
+            <div id="roles-status" class="v-alert v-alert--info">
+              <span class="v-alert__icon">ℹ️</span>
+              <span class="v-alert__content">Роли не загружены. Нажми «Загрузить роли».</span>
+            </div>
           </div>
-          <div class="v-form__group">
-            <label class="v-form__label">Ответ Мастера ([ORCHESTRATOR_PLAN])</label>
-            <textarea id="masterResponse" rows="8" class="v-textarea" placeholder="Вставь ПОЛНЫЙ ответ Мастера..."></textarea>
+        </div>
+      </section>
+
+      <section id="screen-project" class="v-section">
+        <div class="v-card">
+          <h2 class="v-card__title">📦 Проект</h2>
+          <div class="v-card__body">
+            <div id="zip-drop-zone" class="v-zip-drop">
+              <div class="v-zip-drop__icon">📦</div>
+              <div class="v-zip-drop__text">Загрузите ZIP-архив проекта</div>
+              <div class="v-zip-drop__hint">Система проанализирует зависимости между файлами.</div>
+            </div>
+            <input type="file" id="zip-input" class="v-file-input" accept=".zip">
+            <div id="zip-results"></div>
           </div>
-          <button onclick="app.parsePlan()" class="v-btn v-btn--primary v-btn--block">🚀 Распарсить план</button>
+        </div>
+      </section>
+
+      <section id="screen-input" class="v-section">
+        <div class="v-card">
+          <h2 class="v-card__title">📝 Ввод</h2>
+          <div class="v-card__body">
+            <div class="v-form__group">
+              <label class="v-form__label">Задача / Контекст</label>
+              <textarea id="task-input" class="v-textarea" placeholder="Опишите задачу..."></textarea>
+            </div>
+            <div class="v-form__group">
+              <label class="v-form__label">Ответ Мастера</label>
+              <textarea id="master-input" class="v-textarea" placeholder="Вставь ответ каждой роли..."></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="screen-routing" class="v-section">
+        <div class="v-card">
+          <h2 class="v-card__title">🎯 Роли</h2>
+          <div id="roles-container" class="v-card__body"></div>
+        </div>
+      </section>
+
+      <section id="screen-collector" class="v-section">
+        <div class="v-card">
+          <h2 class="v-card__title">🔴 Конфликты!</h2>
+          <div class="v-card__body">
+            <p>Разреши противоречия.</p>
+            <div id="conflicts-container"></div>
+            <div id="no-conflicts" class="v-alert v-alert--success">
+              <span class="v-alert__icon">✅</span>
+              <span class="v-alert__content">Конфликтов нет. Все согласны.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="screen-final" class="v-section">
+        <div class="v-card">
+          <h2 class="v-card__title">🏁 Финал</h2>
+          <div class="v-card__body">
+            <textarea id="final-output" class="v-output" readonly></textarea>
+          </div>
+        </div>
+      </section>
+
+      <section id="screen-logs" class="v-section">
+        <div class="v-card">
+          <h2 class="v-card__title">📋 Тестирование и логи</h2>
+          <div id="logs-container"></div>
+        </div>
+      </section>
+    </main>
+
+    <div class="v-bottom-bar" id="bottom-bar">
+      <div class="v-container">
+        <div class="v-bottom-bar__info">
+          <span id="status-text">Действие: Система готова</span>
+          <span id="version-text">v3.2.1</span>
+        </div>
+        <div class="v-flex v-flex--gap-sm">
+          <button class="v-bottom-bar__btn v-btn--primary" data-screen="screen-settings">⚙️ Настройки</button>
+          <button class="v-bottom-bar__btn v-btn--secondary" data-screen="screen-project">📦 Проект</button>
+          <button class="v-bottom-bar__btn v-btn--secondary" data-screen="screen-input">📝 Ввод</button>
+          <button class="v-bottom-bar__btn v-btn--secondary" data-screen="screen-routing">🎯 Роли</button>
+          <button class="v-bottom-bar__btn v-btn--secondary" data-screen="screen-collector">🔴 Сбор</button>
+          <button class="v-bottom-bar__btn v-btn--secondary" data-screen="screen-final">🏁 Финал</button>
+          <button class="v-bottom-bar__btn v-btn--secondary" data-screen="screen-logs">📋 Тесты</button>
         </div>
       </div>
-    </section>
-
-    <!-- 4. ROUTING -->
-    <section id="screen-routing" class="v-section">
-      <div class="v-card__header">
-        <h2 class="v-card__title">🎯 Распределение ролей</h2>
-        <span id="mandate-count" class="v-card__badge v-card__badge--primary">0 ролей</span>
-      </div>
-      <div id="mandates-list" class="v-mt-sm"></div>
-    </section>
-
-    <!-- 5. COLLECTOR -->
-    <section id="screen-collector" class="v-section">
-      <div class="v-card__header">
-        <h2 class="v-card__title">📥 Сбор результатов</h2>
-        <span id="collector-progress" class="v-card__badge v-card__badge--primary">0 / 0</span>
-      </div>
-      <div class="v-alert v-alert--info">
-        <span class="v-alert__icon">📋</span>
-        <div class="v-alert__content"><div class="v-alert__title">Что делать:</div>Вставь ответ каждой роли в поле ниже.</div>
-      </div>
-      <div id="collector-list" class="v-mt-sm"></div>
-    </section>
-
-    <!-- 6. FINAL -->
-    <section id="screen-final" class="v-section">
-      <div class="v-card__header"><h2 class="v-card__title">🏁 Финальный отчёт</h2></div>
-      <div id="conflicts-warning" class="v-alert v-alert--error v-hidden">
-        <span class="v-alert__icon">🔴</span>
-        <div class="v-alert__content"><div class="v-alert__title">Конфликты!</div>Разреши противоречия.</div>
-      </div>
-      <div id="no-conflicts" class="v-alert v-alert--success v-hidden">
-        <span class="v-alert__icon">✅</span>
-        <div class="v-alert__content"><div class="v-alert__title">Конфликтов нет</div>Все согласны.</div>
-      </div>
-      <textarea id="combinedOutput" rows="18" class="v-output" readonly></textarea>
-      <div class="v-flex v-flex--gap-md v-mt-md">
-        <button onclick="app.copyToClipboard(document.getElementById('combinedOutput').value).then(()=>app.showToast('Скопировано','success'))" class="v-btn v-btn--primary v-btn--block">📋 Копировать</button>
-        <button onclick="app.openKimi()" class="v-btn v-btn--secondary v-btn--block">↗️ Kimi</button>
-      </div>
-    </section>
-
-  <section id="screen-logs" class="v-section">
-    <div class="v-card">
-      <h2>📋 Тестирование и логи</h2>
-      <div id="logs-container"></div>
     </div>
-  </section>
-
   </div>
-</main>
 
-<!-- Bottom Bar -->
-<div id="bottom-action-bar" class="v-bottom-bar v-bottom-bar--hidden">
-  <div class="v-container">
-    <div class="v-bottom-bar__info">
-      <span id="bottom-status">Готово 0 из 4</span>
-      <span id="bottom-hint">вставь ответы ↑</span>
-    </div>
-    <button id="bottom-action-btn" class="v-bottom-bar__btn">Действие</button>
-  </div>
-</div>
+  <input type="file" id="roles-json-input" class="v-file-input" accept=".json">
+  <input type="file" id="md-files-input" class="v-file-input" accept=".md" multiple>
+  <input type="file" id="session-import-input" class="v-file-input" accept=".json">
 
-<!-- Toast -->
-<div id="toast" class="v-toast">Уведомление</div>
-
-<!-- Footer status -->
-<footer class="status-bar" style="text-align:center;padding:1rem;font-size:.8rem;color:var(--v-text-muted);border-top:1px solid var(--v-border);margin-top:2rem;">
-  <span id="status-action">Действие: Система готова</span>
-</footer>
-
-<script src="./js/app.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>
